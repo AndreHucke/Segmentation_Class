@@ -1,358 +1,221 @@
+import heapq
 import numpy as np
-import heapq as hq
 import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use('Qt5Agg')
-from matplotlib.backend_bases import MouseButton  # Add this import
-import numpy as np
-from Project2 import *
-from myVTKWin import *
-import scipy.ndimage as ndi
-from skimage import feature
-import copy
+
+class lwedge:
+    """Class representing an edge with parent, child, and cost attributes."""
+    def __init__(self, child, parent, cost):
+        self.child = child
+        self.parent = parent
+        self.cost = cost
 
 class graphSearch:
-    def __init__(self, node_type):
+    """Base class for graph search algorithms."""
+    def __init__(self, node_type=None):
+        """Initialize graph search with optional node type."""
         self.node_type = node_type
-        self.heap = []
-        self.lastedge = None
-    
-    def run(self, edges, seed, endnode=None):
-        self.edges = edges
-        self.marked = np.zeros(len(edges), dtype=bool)
-        self.pointers = -np.ones(len(edges), dtype=np.longlong)
+        self.parents = {}
+        self.costs = {}
         
-        # Add a maximum iteration count to prevent infinite loops
-        max_iterations = 100000
-        iteration_count = 0
+    def run(self, seed, endnode=None):
+        """
+        Run graph search algorithm from seed to endnode (if specified).
+        Returns path and cost to endnode.
+        """
+        # This should be implemented by subclasses
+        pass
         
-        # Initialize priority queue with seed node
-        self.heap = []
-        hq.heappush(self.heap, self.node_type(child=seed, parent=-1, cost=0))
-        
-        # Continue until queue is empty or end node is found
-        while self.heap and iteration_count < max_iterations:
-            iteration_count += 1
-            # Get node with lowest cost
-            edge = hq.heappop(self.heap)
-            
-            # Mark the node as visited
-            self.mark(edge)
-            
-            # Store this edge as the last processed edge
-            self.lastedge = edge
-            
-            # If we've reached our target, we're done
-            if endnode is not None and edge.child == endnode:
-                break
-            
-            # Find neighbors and add them to priority queue if not visited
-            neighbors = self.findNeibs(edge)
-            for neib in neighbors:
-                if self.isNotMarked(neib):
-                    # Set pointer for backtracking
-                    self.setPointer(neib, edge.child)
-                    # Add to priority queue
-                    hq.heappush(self.heap, neib)
-        
-        # If we reached max iterations, print a warning
-        if iteration_count >= max_iterations:
-            print("Warning: Graph search reached maximum iterations")
-        
-        # If we have an endnode, return path to that
-        if endnode is not None:
-            return self.trace(endnode, seed), self.lastedge.cost
-        # Otherwise return path to last processed node
-        return self.trace(self.lastedge.child, seed), self.lastedge.cost
-    
-    def trace(self, endnode, seednode):
-        # Start at the end node
-        path = [endnode]
-        current = endnode
-        
-        # Follow pointers back to seed node
-        while current != seednode:
-            current = self.getPointer(current)
-            if current == -1:  # Path couldn't be found
-                return []
-            path.append(current)
-        
+    def trace(self, nd, seed):
+        """Trace path from nd back to seed using stored parents."""
+        path = [nd]
+        while nd != seed:
+            if nd not in self.parents:
+                return None  # No path exists
+            nd = self.parents[nd]
+            path.append(nd)
         return path
 
 class graphSearchLW(graphSearch):
+    """Graph search implementation for lightweight edge representation."""
     def __init__(self):
-        super().__init__(lwedge)
-        self.marked = None
-        self.pointers = None
-        self.cost = None
-
+        """Initialize graph search for lightweight edges."""
+        super().__init__(node_type=lwedge)
+        
     def run(self, edges, seed, endnode=None):
+        """
+        Run Dijkstra's algorithm from seed to endnode (if specified).
+        Returns path and cost to endnode or to all nodes.
+        """
+        # Initialize data structures
+        self.parents = {}
+        self.costs = {seed: 0}
+        visited = set()
+        priority_queue = [(0, seed)]
+        
+        while priority_queue:
+            # Get node with lowest cost
+            current_cost, current_node = heapq.heappop(priority_queue)
+            
+            # Skip if we've already processed this node
+            if current_node in visited:
+                continue
+                
+            # Mark as visited
+            visited.add(current_node)
+            
+            # If we reached the target node, we're done
+            if endnode is not None and current_node == endnode:
+                break
+                
+            # Explore neighbors
+            for edge in edges[current_node]:
+                child = edge.child
+                new_cost = current_cost + edge.cost
+                
+                # Update cost if we found a better path
+                if child not in self.costs or new_cost < self.costs[child]:
+                    self.costs[child] = new_cost
+                    self.parents[child] = current_node
+                    heapq.heappush(priority_queue, (new_cost, child))
+        
+        # If endnode is specified, return path and cost to it
+        if endnode is not None:
+            if endnode in self.costs:
+                path = self.trace(endnode, seed)
+                return path, self.costs[endnode]
+            return None, float('inf')  # No path found
+        
+        # Return empty lists if no endnode was specified
+        return [], 0
+
+class liveWire:
+    """Interactive contour drawing class using graphSearch."""
+    def __init__(self, image, edges=None):
+        """
+        Initialize liveWire with image and edge weights.
+        
+        Args:
+            image: 2D numpy array representing the image
+            edges: List of edge lists for graph search
+        """
+        self.image = image
         self.edges = edges
-        self.marked = np.zeros(len(edges), dtype=bool)
-        self.pointers = -np.ones(len(edges), dtype=np.longlong)
-        return super().run(edges, seed, endnode)  # Fixed: passing edges parameter
-
-    def isNotMarked(self, edge):
-        return self.marked[edge.child]==False
-
-    def getPointer(self, node):
-        return self.pointers[node]
-
-    def findNeibs(self, edge):
-        neibs = copy.deepcopy(self.edges[edge.child])
-        for n in neibs:
-            n.cost += edge.cost
-        return neibs
-
-    def setPointer(self, edge, parent):
-        self.pointers[edge.child] = parent
-
-    def mark(self, edge):
-        self.marked[edge.child] = True
-
-# Add the lwedge class here to ensure everything works together
-class lwedge:
-    def __init__(self, child=-1, parent=-1, cost=0):
-        self.parent = parent
-        self.child = child
-        self.cost = cost
-
-    def __lt__(self, rhs):
-        return self.cost < rhs.cost
-
-
-class liveWire():
-    def __init__(self, img, alpha=0.5, beta=0.1, edges=None):
-        self.img = img
-        self.alpha = alpha
-        self.beta = beta
-        self.r, self.c = np.shape(img)
-        self.lastseed = None
+        self.r, self.c = np.shape(image)
         self.gs = graphSearchLW()
-        self.cntrcur = np.array([])  # Changed to start as empty array instead of list
-        self.exit = 0
-        self.temporary_line = None
-        self.first_point = None  # Track the first point to close the contour
         
-        # Create edges if not provided
-        if edges is None:
-            self.edges = self.compute_edges()
-        else:
-            self.edges = edges
-            
-        # Display the image and connect callbacks
+        # Initialize variables for tracking contour
+        self.seed = None
+        self.last_point = None
+        self.cntrcur = []  # Current contour segments
+        self.cntrpts = []  # List of confirmed contour points
+        self.active = False
+        self.complete = False
+        
+        # Set up the plot
         self.fig, self.ax = plt.subplots()
-        self.ax.imshow(self.img.T, 'gray')
-        self.fig.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        self.fig.canvas.mpl_connect('button_press_event', self.on_mouse_click)
+        self.img_display = self.ax.imshow(self.image.T, cmap='gray')
+        self.contour_line, = self.ax.plot([], [], 'r-')
+        self.points_line, = self.ax.plot([], [], 'go')
         
-        # Start interactive loop
-        plt.ion()
+        # Connect event handlers
+        self.fig.canvas.mpl_connect('button_press_event', self.onclick)
+        self.fig.canvas.mpl_connect('motion_notify_event', self.onmove)
+        
+        plt.title("Left click to add points, right click to complete")
         plt.show()
-        while self.exit == 0:
-            plt.pause(0.05)
-        plt.ioff()
-    
-    def compute_edges(self):
-        # Create edge weights based on image gradients
-        edges = [[] for i in range(self.r * self.c)]
         
-        # Compute edge features (Sobel and Canny)
-        sobel = np.zeros((self.r, self.c, 4))
-        sobel[:,:,0] = ndi.convolve(self.img, np.array([[0,1,2], [-1,0,1], [-2,-1,0]]))  # x-y-/x+y+
-        sobel[:,:,1] = ndi.convolve(self.img, np.array([[2,1,0], [1,0,-1], [0,-1,-2]]))  # x-y+/x+y-
-        sobel[:,:,2] = ndi.convolve(self.img, np.array([[1, 1, 1], [0, 0, 0], [-1, -1, -1]]))  # y+/-
-        sobel[:,:,3] = ndi.convolve(self.img, np.array([[1, 1, 1], [0, 0, 0], [-1, -1, -1]]).T)  # x+/-
-        
-        # Normalize Sobel features
-        sobel = np.abs(sobel)
-        for i in range(4):
-            sobel[:,:,i] = 1 - sobel[:,:,i]/np.amax(sobel[:,:,i])
-        
-        # Add Canny edge detection
-        canny = 1 - feature.canny(self.img, sigma=1)
-        
-        # Build edge list
-        sq2 = np.sqrt(2)
-        for x in range(self.r):
-            for y in range(self.c):
-                nd = x + y * self.r
-                if x > 0:
-                    if y > 0:
-                        # diagonal x-y- neighbor
-                        neib = x - 1 + (y - 1) * self.r
-                        edges[nd].append(lwedge(child=neib, parent=nd,
-                                            cost=sq2 * (self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 0])))
-                    if y < self.c - 1:
-                        # diagonal x-y+ neighbor
-                        neib = x - 1 + (y + 1) * self.r
-                        edges[nd].append(lwedge(child=neib, parent=nd,
-                                            cost=sq2 * (self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 1])))
-                    # x- neighbor
-                    neib = (x - 1 + y * self.r)
-                    edges[nd].append(lwedge(child=neib, parent=nd,
-                                        cost=self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 3]))
-                if x < self.r - 1:
-                    if y > 0:
-                        # diagonal x+y- neighbor
-                        neib = x + 1 + (y - 1) * self.r
-                        edges[nd].append(lwedge(child=neib, parent=nd,
-                                            cost=sq2 * (self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 1])))
-                    if y < self.c - 1:
-                        # diagonal x+y+ neighbor
-                        neib = x + 1 + (y + 1) * self.r
-                        edges[nd].append(lwedge(child=neib, parent=nd,
-                                            cost=sq2 * (self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 0])))
-                    # x+ neighbor
-                    neib = (x + 1 + y * self.r)
-                    edges[nd].append(lwedge(child=neib, parent=nd,
-                                       cost=self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 3]))
-                if y > 0:
-                    # y- neighbor
-                    neib = (x + (y - 1) * self.r)
-                    edges[nd].append(lwedge(child=neib, parent=nd,
-                                       cost=self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 2]))
-                if y < self.c - 1:
-                    # y+ neighbor
-                    neib = (x + (y + 1) * self.r)
-                    edges[nd].append(lwedge(child=neib, parent=nd,
-                                       cost=self.beta + self.alpha * canny[x, y] + (1 - self.alpha) * sobel[x, y, 2]))
-        
-        return edges
-
-    def display(self):
-        # Clear previous plot elements
-        if self.ax is not None:
-            self.ax.clear()
-            self.ax.imshow(self.img.T, 'gray')
-            
-            # Draw existing contour segments as an open contour in green
-            if len(self.cntrcur) > 0:
-                self.ax.plot(self.cntrcur[:, 0], self.cntrcur[:, 1], 'g-', linewidth=2)
-                
-                # If this is after the final right-click, we'll have exited
-                if self.exit == 1:
-                    # Mark contour as closed with a different color
-                    self.ax.plot(self.cntrcur[:, 0], self.cntrcur[:, 1], 'y-', linewidth=2.5)
-            
-            # Draw current seed point in red
-            if self.lastseed is not None:
-                x = self.lastseed % self.r
-                y = self.lastseed // self.r
-                self.ax.plot(x, y, 'ro')
-                
-            # Draw first point with a different marker
-            if self.first_point is not None:
-                self.ax.plot(self.first_point[0], self.first_point[1], 'bo', markersize=8)
-                
-            # Update the canvas
-            self.fig.canvas.draw_idle()
-
-    def on_mouse_move(self, event):
-        # Check if mouse is in axes and we have a seed point
-        if event.inaxes != self.ax or self.lastseed is None:
-            return
-        
-        try:
-            # Process mouse movement only if coordinates are valid
-            if event.xdata is not None and event.ydata is not None:
-                # Get current mouse position
-                x = np.round(event.xdata).astype(np.longlong)
-                y = np.round(event.ydata).astype(np.longlong)
-                
-                # Check if mouse position is within image boundaries
-                if 0 <= x < self.r and 0 <= y < self.c:
-                    currentpos = x + self.r * y
-                    
-                    # Find path from last seed to current position
-                    path_nodes, _ = self.gs.run(self.edges, self.lastseed, currentpos)
-                    
-                    # Remove previous temporary line if exists
-                    if hasattr(self, 'temporary_line') and self.temporary_line is not None:
-                        self.temporary_line.remove()
-                        self.temporary_line = None
-                    
-                    # Draw new temporary line if path exists
-                    if len(path_nodes) > 0:
-                        # Convert path nodes to x,y coordinates
-                        path = np.zeros((len(path_nodes), 2))
-                        for i in range(len(path_nodes)):
-                            path[i, 0] = path_nodes[i] % self.r
-                            path[i, 1] = path_nodes[i] // self.r
-                            
-                        self.temporary_line, = self.ax.plot(path[:, 0], path[:, 1], 'b-', linewidth=1.5)
-                        self.fig.canvas.draw_idle()
-                        plt.pause(0.05)
-        except Exception as e:
-            print(f"Error in mouse move: {e}")
-
-    def on_mouse_click(self, event):
-        # Using the existing button code (MouseButton.LEFT/RIGHT)
+    def onclick(self, event):
+        """Handle mouse click events."""
         if event.inaxes != self.ax:
             return
             
-        try:
-            if event.button == 1:  # Left click - add seed point
-                x = np.round(event.xdata).astype(np.longlong)
-                y = np.round(event.ydata).astype(np.longlong)
-                
-                # Check if within image boundaries
-                if 0 <= x < self.r and 0 <= y < self.c:
-                    current_point = x + self.r*y
-                    
-                    if self.lastseed is None:
-                        # First click - initialize contour
-                        self.lastseed = current_point
-                        self.first_point = (x, y)
-                        # Initialize first point in contour
-                        self.cntrcur = np.array([[x, y]])
-                        self.gs = graphSearchLW()
-                        self.gs.run(self.edges, self.lastseed)
-                    else:
-                        # Add new segment to contour
-                        self.addPath(current_point)
-                        self.lastseed = current_point
-                        self.gs = graphSearchLW()
-                        self.gs.run(self.edges, self.lastseed)
-                    
-                    self.display()
-                    plt.pause(0.05)
-
-            elif event.button == 3:  # Right click - finish contour
-                if len(self.cntrcur) > 0 and self.first_point is not None and self.lastseed is not None:
-                    # Close the contour by connecting current point to the first point
-                    first_seed = self.first_point[0] + self.r * self.first_point[1]
-                    self.addPath(first_seed)
-                    self.exit = 1
-                
-                self.display()
-                plt.pause(0.05)
-                
-        except Exception as e:
-            print(f"Error in mouse click: {e}")
-
-    def addPath(self, endpoint):
-        try:
-            # Get the path from current lastseed to endpoint
-            path_nodes, _ = self.gs.run(self.edges, self.lastseed, endpoint)
+        x, y = int(event.xdata), int(event.ydata)
+        
+        # Ensure clicks are within image boundaries
+        if x < 0 or x >= self.r or y < 0 or y >= self.c:
+            return
             
-            if len(path_nodes) > 0:
-                # Convert path nodes to x,y coordinates
-                path = np.zeros((len(path_nodes), 2))
-                for i in range(len(path_nodes)):
-                    path[i, 0] = path_nodes[i] % self.r
-                    path[i, 1] = path_nodes[i] // self.r
-                
-                # Add to contour
-                if len(self.cntrcur) == 1:
-                    # First segment - append the path excluding the first point
-                    # (which is already in cntrcur as the first point)
-                    if len(path) > 1:
-                        self.cntrcur = np.concatenate((self.cntrcur, path[1:]), axis=0)
-                else:
-                    # Subsequent segments - append path excluding first point
-                    if len(path) > 1:
-                        self.cntrcur = np.concatenate((self.cntrcur, path[1:]), axis=0)
+        # Convert 2D coordinates to 1D node index
+        node = x + y * self.r
+        
+        # Left click - add point to contour
+        if event.button == 1:
+            if not self.active:
+                # First click - initialize contour
+                self.seed = node
+                self.last_point = node
+                self.cntrpts.append((x, y))
+                self.active = True
+            else:
+                # Add point and segment to contour
+                path, cost = self.gs.run(self.edges, self.last_point, node)
+                if path:
+                    # Reverse the path so it goes from start to end
+                    path.reverse()
+                    # Convert path nodes to 2D coordinates
+                    path_coords = np.array([(n % self.r, n // self.r) for n in path])
+                    self.cntrcur.append(path_coords)
+                    self.last_point = node
+                    self.cntrpts.append((x, y))
+                    self.update_display()
                     
-        except Exception as e:
-            print(f"Error adding path: {e}")
+        # Right click - complete contour
+        elif event.button == 3 and self.active:
+            # Close the contour by connecting back to the first point
+            if self.seed != self.last_point:
+                path, cost = self.gs.run(self.edges, self.last_point, self.seed)
+                if path:
+                    path.reverse()  # Reverse the path
+                    path_coords = np.array([(n % self.r, n // self.r) for n in path])
+                    self.cntrcur.append(path_coords)
+                    self.update_display()
+            
+            self.active = False
+            self.complete = True
+            print("Contour completed")
+            
+    def onmove(self, event):
+        """Handle mouse movement to show potential contour segment."""
+        if not self.active or event.inaxes != self.ax:
+            return
+            
+        x, y = int(event.xdata), int(event.ydata)
+        
+        # Ensure coordinates are within image boundaries
+        if x < 0 or x >= self.r or y < 0 or y >= self.c:
+            return
+            
+        # Calculate potential path to current mouse position
+        node = x + y * self.r
+        path, _ = self.gs.run(self.edges, self.last_point, node)
+        
+        if path:
+            # Reverse the path
+            path.reverse()
+            # Create temporary display of potential path
+            temp_path = np.array([(n % self.r, n // self.r) for n in path])
+            self.update_display(temp_path)
+            
+    def update_display(self, temp_path=None):
+        """Update the display with current contour and temporary path."""
+        # Plot confirmed contour segments
+        x_points = []
+        y_points = []
+        
+        for segment in self.cntrcur:
+            x_points.extend(segment[:, 0])
+            y_points.extend(segment[:, 1])
+            
+        # Add temporary path if available
+        if temp_path is not None:
+            x_points.extend(temp_path[:, 0])
+            y_points.extend(temp_path[:, 1])
+            
+        self.contour_line.set_data(x_points, y_points)
+        
+        # Plot anchor points
+        x_anchors = [p[0] for p in self.cntrpts]
+        y_anchors = [p[1] for p in self.cntrpts]
+        self.points_line.set_data(x_anchors, y_anchors)
+        
+        self.fig.canvas.draw_idle()
