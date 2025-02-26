@@ -63,7 +63,7 @@ class lwedge:
     def __lt__(self, rhs):
         return self.cost < rhs.cost
 
-# build edge lists, accounting for image boundaries
+# build edge lists, accounting for image boundaries 
 sq2 = np.sqrt(2)
 for x in range(r):
     for y in range(c):

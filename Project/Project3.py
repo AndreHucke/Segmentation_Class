@@ -17,12 +17,22 @@ class graphSearch:
         self.heap = []
         self.lastedge = None
     
-    def run(self, seed, endnode=None):
+    def run(self, edges, seed, endnode=None):
+        self.edges = edges
+        self.marked = np.zeros(len(edges), dtype=bool)
+        self.pointers = -np.ones(len(edges), dtype=np.longlong)
+        
+        # Add a maximum iteration count to prevent infinite loops
+        max_iterations = 100000
+        iteration_count = 0
+        
         # Initialize priority queue with seed node
+        self.heap = []
         hq.heappush(self.heap, self.node_type(child=seed, parent=-1, cost=0))
         
         # Continue until queue is empty or end node is found
-        while self.heap:
+        while self.heap and iteration_count < max_iterations:
+            iteration_count += 1
             # Get node with lowest cost
             edge = hq.heappop(self.heap)
             
@@ -44,6 +54,10 @@ class graphSearch:
                     self.setPointer(neib, edge.child)
                     # Add to priority queue
                     hq.heappush(self.heap, neib)
+        
+        # If we reached max iterations, print a warning
+        if iteration_count >= max_iterations:
+            print("Warning: Graph search reached maximum iterations")
         
         # If we have an endnode, return path to that
         if endnode is not None:
@@ -76,7 +90,7 @@ class graphSearchLW(graphSearch):
         self.edges = edges
         self.marked = np.zeros(len(edges), dtype=bool)
         self.pointers = -np.ones(len(edges), dtype=np.longlong)
-        return super().run(seed, endnode)
+        return super().run(edges, seed, endnode)  # Fixed: passing edges parameter
 
     def isNotMarked(self, edge):
         return self.marked[edge.child]==False
@@ -115,9 +129,10 @@ class liveWire():
         self.r, self.c = np.shape(img)
         self.lastseed = None
         self.gs = graphSearchLW()
-        self.cntrcur = []
+        self.cntrcur = np.array([])  # Changed to start as empty array instead of list
         self.exit = 0
         self.temporary_line = None
+        self.first_point = None  # Track the first point to close the contour
         
         # Create edges if not provided
         if edges is None:
@@ -211,20 +226,24 @@ class liveWire():
             self.ax.clear()
             self.ax.imshow(self.img.T, 'gray')
             
-            # Draw existing contour segments in green
+            # Draw existing contour segments as an open contour in green
             if len(self.cntrcur) > 0:
-                if isinstance(self.cntrcur, list):
-                    for segment in self.cntrcur:
-                        if len(segment) > 0:
-                            self.ax.plot(segment[:, 0], segment[:, 1], 'g-', linewidth=2)
-                else:  # Assuming it's a numpy array
-                    self.ax.plot(self.cntrcur[:, 0], self.cntrcur[:, 1], 'g-', linewidth=2)
-                    
-            # Draw seed points in red
+                self.ax.plot(self.cntrcur[:, 0], self.cntrcur[:, 1], 'g-', linewidth=2)
+                
+                # If this is after the final right-click, we'll have exited
+                if self.exit == 1:
+                    # Mark contour as closed with a different color
+                    self.ax.plot(self.cntrcur[:, 0], self.cntrcur[:, 1], 'y-', linewidth=2.5)
+            
+            # Draw current seed point in red
             if self.lastseed is not None:
                 x = self.lastseed % self.r
                 y = self.lastseed // self.r
                 self.ax.plot(x, y, 'ro')
+                
+            # Draw first point with a different marker
+            if self.first_point is not None:
+                self.ax.plot(self.first_point[0], self.first_point[1], 'bo', markersize=8)
                 
             # Update the canvas
             self.fig.canvas.draw_idle()
@@ -273,22 +292,26 @@ class liveWire():
             return
             
         try:
-            # Must be adapted to match the existing code approach
-            # Use the actual button values (1 for left, 3 for right)
             if event.button == 1:  # Left click - add seed point
                 x = np.round(event.xdata).astype(np.longlong)
                 y = np.round(event.ydata).astype(np.longlong)
                 
                 # Check if within image boundaries
                 if 0 <= x < self.r and 0 <= y < self.c:
+                    current_point = x + self.r*y
+                    
                     if self.lastseed is None:
-                        self.lastseed = x + self.r*y
+                        # First click - initialize contour
+                        self.lastseed = current_point
+                        self.first_point = (x, y)
+                        # Initialize first point in contour
+                        self.cntrcur = np.array([[x, y]])
                         self.gs = graphSearchLW()
                         self.gs.run(self.edges, self.lastseed)
                     else:
-                        nextseed = x + self.r*y
-                        self.addPath(nextseed, self.lastseed)
-                        self.lastseed = nextseed
+                        # Add new segment to contour
+                        self.addPath(current_point)
+                        self.lastseed = current_point
                         self.gs = graphSearchLW()
                         self.gs.run(self.edges, self.lastseed)
                     
@@ -296,14 +319,11 @@ class liveWire():
                     plt.pause(0.05)
 
             elif event.button == 3:  # Right click - finish contour
-                if len(self.cntrcur) > 0:
-                    x = np.round(event.xdata).astype(np.longlong)
-                    y = np.round(event.ydata).astype(np.longlong)
-                    
-                    if 0 <= x < self.r and 0 <= y < self.c:
-                        nextseed = x + self.r * y
-                        self.addPath(nextseed, self.lastseed)
-                        self.exit = 1
+                if len(self.cntrcur) > 0 and self.first_point is not None and self.lastseed is not None:
+                    # Close the contour by connecting current point to the first point
+                    first_seed = self.first_point[0] + self.r * self.first_point[1]
+                    self.addPath(first_seed)
+                    self.exit = 1
                 
                 self.display()
                 plt.pause(0.05)
@@ -311,10 +331,10 @@ class liveWire():
         except Exception as e:
             print(f"Error in mouse click: {e}")
 
-    def addPath(self, endpoint, seed):
+    def addPath(self, endpoint):
         try:
-            # Get the path from seed to endpoint
-            path_nodes, _ = self.gs.run(self.edges, seed, endpoint)
+            # Get the path from current lastseed to endpoint
+            path_nodes, _ = self.gs.run(self.edges, self.lastseed, endpoint)
             
             if len(path_nodes) > 0:
                 # Convert path nodes to x,y coordinates
@@ -323,19 +343,16 @@ class liveWire():
                     path[i, 0] = path_nodes[i] % self.r
                     path[i, 1] = path_nodes[i] // self.r
                 
-                # Add to contour collection
-                if len(self.cntrcur) == 0:
-                    # First segment - include the seed point
-                    seed_x = seed % self.r
-                    seed_y = seed // self.r
-                    start_point = np.array([[seed_x, seed_y]])
-                    self.cntrcur = np.concatenate((start_point, path), axis=0)
+                # Add to contour
+                if len(self.cntrcur) == 1:
+                    # First segment - append the path excluding the first point
+                    # (which is already in cntrcur as the first point)
+                    if len(path) > 1:
+                        self.cntrcur = np.concatenate((self.cntrcur, path[1:]), axis=0)
                 else:
-                    # Append to existing contour
-                    if isinstance(self.cntrcur, list):
-                        self.cntrcur.append(path)
-                    else:
-                        self.cntrcur = np.concatenate((self.cntrcur, path), axis=0)
+                    # Subsequent segments - append path excluding first point
+                    if len(path) > 1:
+                        self.cntrcur = np.concatenate((self.cntrcur, path[1:]), axis=0)
+                    
         except Exception as e:
             print(f"Error adding path: {e}")
-
