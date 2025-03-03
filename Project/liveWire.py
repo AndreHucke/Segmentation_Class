@@ -2,15 +2,12 @@ import matplotlib.pyplot as plt
 import nrrd
 import matplotlib
 matplotlib.use('Qt5Agg')
-import matplotlib.pyplot as plot
 import numpy as np
 from Project1 import *
 from Project2 import *
 from myVTKWin import *
 import scipy.ndimage as ndi
 from skimage import feature
-
-####Need lots of updates to pdf code demo
 
 # Load CT image to demo connected component analysis
 img,header = nrrd.read('./EECE_395/0522c0001/img.nrrd')
