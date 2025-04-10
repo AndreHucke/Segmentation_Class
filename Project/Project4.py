@@ -17,6 +17,9 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import wilcoxon  
 from tqdm import tqdm
+import concurrent.futures
+import signal
+import functools
 
 class MandibleAnalysis:
     """Class to analyze and compare multiple segmentations of the mandible."""
@@ -224,9 +227,29 @@ class MandibleAnalysis:
                 
             return min_dist, closest
     
+    def _process_vertex_batch(self, vertex_batch, faces2, verts2, max_dist):
+        """Process a batch of vertices to find minimum distances to triangles."""
+        results = []
+        for vertex in vertex_batch:
+            min_dist = max_dist
+            closest_point = None
+            
+            for face_idx in range(len(faces2)):
+                face = faces2[face_idx]
+                triangle_verts = [verts2[face[0]], verts2[face[1]], verts2[face[2]]]
+                
+                dist, closest = self.point_to_triangle_distance(vertex, triangle_verts)
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_point = closest
+            
+            results.append((min_dist, closest_point, vertex))
+        return results
+    
     def surface_distances(self, surface1, surface2, max_dist=float('inf')):
         """
-        Calculate surface distances between two surfaces.
+        Calculate surface distances between two surfaces with parallel processing.
         
         Args:
             surface1: Tuple of (vertices, faces) for the first surface
@@ -245,37 +268,89 @@ class MandibleAnalysis:
         
         if verts1 is None or verts2 is None or faces1 is None or faces2 is None:
             return [], 0, 0, [], []
+        
+        # Skip parallelization for small number of vertices
+        if len(verts1) < 1000:
+            distances = []
+            max_distance = 0
+            mp1 = np.zeros(3)
+            mp2 = np.zeros(3)
             
+            for vertex in tqdm(verts1, desc="Calculating surface distances", disable=len(verts1) < 100):
+                min_dist = max_dist
+                closest_point = None
+                
+                for face_idx in range(len(faces2)):
+                    face = faces2[face_idx]
+                    triangle_verts = [verts2[face[0]], verts2[face[1]], verts2[face[2]]]
+                    
+                    dist, closest = self.point_to_triangle_distance(vertex, triangle_verts)
+                    
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_point = closest
+                
+                distances.append(min_dist)
+                
+                if min_dist > max_distance:
+                    max_distance = min_dist
+                    mp1 = vertex
+                    mp2 = closest_point
+            
+            mean_dist = np.mean(distances) if distances else 0
+            return distances, mean_dist, max_distance, mp1, mp2
+        
+        # For larger datasets, use parallel processing
+        # Determine number of batches based on CPU count
+        num_workers = min(os.cpu_count(), 8)  # Limit to 8 cores max
+        batch_size = max(1, len(verts1) // (num_workers * 4))  # Create batches for better progress reporting
+        vertex_batches = [verts1[i:i+batch_size] for i in range(0, len(verts1), batch_size)]
+        
         distances = []
         max_distance = 0
         mp1 = np.zeros(3)
         mp2 = np.zeros(3)
         
-        for vertex in tqdm(verts1, desc="Calculating surface distances", disable=len(verts1) < 100):
-            min_dist = max_dist
-            closest_point = None
-            
-            for face_idx in range(len(faces2)):
-                face = faces2[face_idx]
-                triangle_verts = [verts2[face[0]], verts2[face[1]], verts2[face[2]]]
-                
-                dist, closest = self.point_to_triangle_distance(vertex, triangle_verts)
-                
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_point = closest
-            
-            distances.append(min_dist)
-            
-            if min_dist > max_distance:
-                max_distance = min_dist
-                mp1 = vertex
-                mp2 = closest_point
+        # Create a progress bar for the batches
+        pbar = tqdm(total=len(verts1), desc="Calculating surface distances")
         
+        # Function to update progress and handle results
+        def update_progress(future):
+            nonlocal distances, max_distance, mp1, mp2
+            if not future.cancelled():
+                batch_results = future.result()
+                for min_dist, closest_point, vertex in batch_results:
+                    distances.append(min_dist)
+                    if min_dist > max_distance:
+                        max_distance = min_dist
+                        mp1 = vertex
+                        mp2 = closest_point
+                pbar.update(len(batch_results))
+        
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+                # Submit all batches to the executor
+                futures = []
+                for batch in vertex_batches:
+                    future = executor.submit(self._process_vertex_batch, batch, faces2, verts2, max_dist)
+                    future.add_done_callback(update_progress)
+                    futures.append(future)
+                
+                # Wait for all futures to complete or for keyboard interrupt
+                concurrent.futures.wait(futures)
+        
+        except KeyboardInterrupt:
+            pbar.write("Interrupted by user. Cleaning up...")
+            # Allow clean exit on Ctrl+C
+            for future in futures:
+                future.cancel()
+        
+        finally:
+            pbar.close()
+            
         mean_dist = np.mean(distances) if distances else 0
-        
         return distances, mean_dist, max_distance, mp1, mp2
-    
+
     def calculate_surface_metrics(self, surface1, surface2):
         """
         Calculate bidirectional surface metrics between two surfaces.
