@@ -15,15 +15,20 @@ from myVTKWin import *
 from skimage import measure
 import pandas as pd
 import seaborn as sns
-from scipy.stats import wilcoxon  # Add import for Wilcoxon test
+from scipy.stats import wilcoxon  
+from tqdm import tqdm
 
 class MandibleAnalysis:
     """Class to analyze and compare multiple segmentations of the mandible."""
     
     def __init__(self, base_path=None):
-        """Initialize with base path to the dataset."""
+        """
+        Initialize with base path to the dataset.
+        
+        Args:
+            base_path: Path to the base directory of the dataset
+        """
         if base_path is None:
-            # Get the base path by finding the script location and navigating up to the root
             script_dir = os.path.dirname(os.path.abspath(__file__))
             self.base_path = os.path.dirname(os.path.dirname(script_dir))
         else:
@@ -46,11 +51,9 @@ class MandibleAnalysis:
             'rater3': [1.0, 1.0, 0.0],        # Yellow
             'majority': [1.0, 0.0, 1.0]       # Magenta
         }
-        
+
         # Results storage
         self.results = []
-
-        # Additional storage for confusion matrix data
         self.confusion_matrices = {
             'rater1': np.zeros((2, 2), dtype=np.int64),
             'rater2': np.zeros((2, 2), dtype=np.int64),
@@ -103,34 +106,6 @@ class MandibleAnalysis:
         intersection = np.sum(mask1 * mask2)
         return 2.0 * intersection / (np.sum(mask1) + np.sum(mask2))
 
-    def hausdorff_distance(self, verts1, verts2):
-        """Calculate Hausdorff distance between two point sets."""
-        if verts1 is None or verts2 is None or len(verts1) == 0 or len(verts2) == 0:
-            return float('inf')
-        
-        # Calculate distances from verts1 to verts2
-        distances_1_to_2 = np.min(np.sqrt(np.sum((verts1[:, np.newaxis, :] - verts2[np.newaxis, :, :]) ** 2, axis=2)), axis=1)
-        
-        # Calculate distances from verts2 to verts1
-        distances_2_to_1 = np.min(np.sqrt(np.sum((verts2[:, np.newaxis, :] - verts1[np.newaxis, :, :]) ** 2, axis=2)), axis=1)
-        
-        # Hausdorff distance is the maximum of the two directed distances
-        return max(np.max(distances_1_to_2), np.max(distances_2_to_1))
-
-    def mean_surface_distance(self, verts1, verts2):
-        """Calculate mean symmetric surface distance between two point sets."""
-        if verts1 is None or verts2 is None or len(verts1) == 0 or len(verts2) == 0:
-            return float('inf')
-        
-        # Calculate distances from verts1 to verts2
-        distances_1_to_2 = np.min(np.sqrt(np.sum((verts1[:, np.newaxis, :] - verts2[np.newaxis, :, :]) ** 2, axis=2)), axis=1)
-        
-        # Calculate distances from verts2 to verts1
-        distances_2_to_1 = np.min(np.sqrt(np.sum((verts2[:, np.newaxis, :] - verts1[np.newaxis, :, :]) ** 2, axis=2)), axis=1)
-        
-        # Mean symmetric surface distance
-        return (np.mean(distances_1_to_2) + np.mean(distances_2_to_1)) / 2.0
-
     def create_majority_vote(self, mask1, mask2, mask3):
         """Create a majority vote mask from three rater masks."""
         if mask1 is None or mask2 is None or mask3 is None:
@@ -179,14 +154,14 @@ class MandibleAnalysis:
         
         return sensitivity, specificity
 
-    def analyze_case(self, case, show_visualization=True):
-        """Analyze a single case: load masks, calculate metrics, and visualize."""
+    def _analyze_single_case(self, case, show_visualization=True):
+        """Analyze a single case."""
         print(f"\nAnalyzing case: {case}")
         
-        # Load the ground truth mask (mandible.nrrd)
+        # Load the ground truth mask
         gt_mask, gt_voxel_size, gt_header = self.load_mask(case, 'Mandible.nrrd')
         
-        # Load rater masks (target1.nrrd, target2.nrrd, target3.nrrd)
+        # Load rater masks
         rater_masks = {}
         for i in range(1, 4):
             mask, voxel_size, _ = self.load_mask(case, f'target{i}.nrrd')
@@ -195,15 +170,12 @@ class MandibleAnalysis:
         # Skip this case if any mask is missing
         if gt_mask is None or any(mask is None for mask in rater_masks.values()):
             print(f"Skipping case {case} due to missing masks")
-            return
+            return None
         
         # Compute confusion matrices for each rater
-        confusion_matrices = {}
+        local_confusion_matrices = {}
         for rater, mask in rater_masks.items():
-            cm = self.compute_confusion_matrix(gt_mask, mask)
-            confusion_matrices[rater] = cm
-            # Accumulate to global confusion matrices
-            self.confusion_matrices[rater] += cm
+            local_confusion_matrices[rater] = self.compute_confusion_matrix(gt_mask, mask)
         
         # Create majority vote segmentation
         majority_mask = self.create_majority_vote(
@@ -234,22 +206,16 @@ class MandibleAnalysis:
         metrics = {}
         for rater in list(rater_masks.keys()) + ['majority']:
             dice = self.dice_coefficient(gt_mask, rater_masks[rater] if rater != 'majority' else majority_mask)
-            hausdorff = self.hausdorff_distance(surfaces['ground_truth'][0], surfaces[rater][0])
-            mean_dist = self.mean_surface_distance(surfaces['ground_truth'][0], surfaces[rater][0])
             
             metrics[rater] = {
-                'dice': dice,
-                'hausdorff': hausdorff,
-                'mean_distance': mean_dist
+                'dice': dice
             }
             
             # Print results
             print(f"{rater.capitalize()} - Volume: {volumes[rater]:.2f} mm³, " +
-                  f"Dice: {dice:.4f}, " +
-                  f"Hausdorff: {hausdorff:.4f} mm, " +
-                  f"Mean Surface Distance: {mean_dist:.4f} mm")
+                  f"Dice: {dice:.4f}")
         
-        # Store results for later aggregation
+        # Store results
         case_results = {
             'case': case,
             'ground_truth_volume': volumes['ground_truth']
@@ -258,35 +224,29 @@ class MandibleAnalysis:
         for rater in list(rater_masks.keys()) + ['majority']:
             case_results[f'{rater}_volume'] = volumes[rater]
             case_results[f'{rater}_dice'] = metrics[rater]['dice']
-            case_results[f'{rater}_hausdorff'] = metrics[rater]['hausdorff']
-            case_results[f'{rater}_mean_distance'] = metrics[rater]['mean_distance']
             
         # Add confusion matrix metrics to case results
         for rater in rater_masks.keys():
-            sensitivity, specificity = self.compute_sensitivity_specificity(confusion_matrices[rater])
+            sensitivity, specificity = self.compute_sensitivity_specificity(local_confusion_matrices[rater])
             case_results[f'{rater}_sensitivity'] = sensitivity
             case_results[f'{rater}_specificity'] = specificity
-
-        self.results.append(case_results)
         
-        # Visualization
+        # If visualization is requested, create window but only return the data
         if show_visualization:
-            win = myVtkWin(title=f"Mandible Segmentation - Case {case}")
-            
-            # Add ground truth surface
-            win.addSurf(*surfaces['ground_truth'], color=self.colors['ground_truth'], opacity=0.3)
-            
-            # Add rater surfaces
-            for rater in rater_masks.keys():
-                win.addSurf(*surfaces[rater], color=self.colors[rater], opacity=0.3)
-            
-            # Add majority vote surface
-            win.addSurf(*surfaces['majority'], color=self.colors['majority'], opacity=0.3)
-            
-            win.render()
-            return win
+            vis_data = {
+                'surfaces': surfaces,
+                'colors': self.colors
+            }
+            return {
+                'results': case_results,
+                'confusion_matrices': local_confusion_matrices,
+                'visualization': vis_data
+            }
         
-        return None
+        return {
+            'results': case_results,
+            'confusion_matrices': local_confusion_matrices
+        }
 
     def print_confusion_matrices_table(self):
         """Create tabular display of confusion matrices and sensitivity/specificity values."""
@@ -339,11 +299,9 @@ class MandibleAnalysis:
         print("\n=== Wilcoxon Signed-Rank Test Results ===")
         
         # Metrics to compare
-        metrics = ['dice', 'hausdorff', 'mean_distance']
+        metrics = ['dice']
         metric_names = {
-            'dice': 'Dice Coefficient',
-            'hausdorff': 'Hausdorff Distance',
-            'mean_distance': 'Mean Surface Distance'
+            'dice': 'Dice Coefficient'
         }
         
         # Raters to compare (including majority vote)
@@ -388,7 +346,7 @@ class MandibleAnalysis:
     
     def create_boxplots(self, results_df):
         """Create boxplots for the different metrics."""
-        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+        fig, axs = plt.subplots(1, 2, figsize=(14, 5))
         
         # Volume comparison
         volume_data = [
@@ -399,10 +357,10 @@ class MandibleAnalysis:
             results_df['majority_volume']
         ]
         
-        axs[0, 0].boxplot(volume_data)
-        axs[0, 0].set_title('Segmentation Volumes')
-        axs[0, 0].set_xticklabels(['Ground Truth', 'Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
-        axs[0, 0].set_ylabel('Volume (mm³)')
+        axs[0].boxplot(volume_data)
+        axs[0].set_title('Segmentation Volumes')
+        axs[0].set_xticklabels(['Ground Truth', 'Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
+        axs[0].set_ylabel('Volume (mm³)')
         
         # Dice coefficient
         dice_data = [
@@ -412,36 +370,10 @@ class MandibleAnalysis:
             results_df['majority_dice']
         ]
         
-        axs[0, 1].boxplot(dice_data)
-        axs[0, 1].set_title('Dice Similarity Coefficient')
-        axs[0, 1].set_xticklabels(['Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
-        axs[0, 1].set_ylabel('Dice Coefficient')
-        
-        # Hausdorff distance
-        hausdorff_data = [
-            results_df['rater1_hausdorff'],
-            results_df['rater2_hausdorff'],
-            results_df['rater3_hausdorff'],
-            results_df['majority_hausdorff']
-        ]
-        
-        axs[1, 0].boxplot(hausdorff_data)
-        axs[1, 0].set_title('Hausdorff Distance')
-        axs[1, 0].set_xticklabels(['Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
-        axs[1, 0].set_ylabel('Distance (mm)')
-        
-        # Mean surface distance
-        mean_dist_data = [
-            results_df['rater1_mean_distance'],
-            results_df['rater2_mean_distance'],
-            results_df['rater3_mean_distance'],
-            results_df['majority_mean_distance']
-        ]
-        
-        axs[1, 1].boxplot(mean_dist_data)
-        axs[1, 1].set_title('Mean Surface Distance')
-        axs[1, 1].set_xticklabels(['Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
-        axs[1, 1].set_ylabel('Distance (mm)')
+        axs[1].boxplot(dice_data)
+        axs[1].set_title('Dice Similarity Coefficient')
+        axs[1].set_xticklabels(['Rater 1', 'Rater 2', 'Rater 3', 'Majority'])
+        axs[1].set_ylabel('Dice Coefficient')
         
         plt.tight_layout()
         plt.pause(0.1)  # Small pause to ensure plot renders
@@ -473,57 +405,52 @@ class MandibleAnalysis:
 
     def run_analysis(self, show_visualization=True):
         """Run analysis for all cases and aggregate results."""
-        # Reset confusion matrices before running analysis
+        # Reset results
+        self.results = []
         for rater in self.confusion_matrices:
             self.confusion_matrices[rater] = np.zeros((2, 2), dtype=np.int64)
         
         all_windows = []
         
-        for case in self.cases:
-            win = self.analyze_case(case, show_visualization)
-            if win:
-                all_windows.append(win)
+        # Process cases sequentially with progress bar
+        for case in tqdm(self.cases, desc="Processing cases"):
+            result = self._analyze_single_case(case, show_visualization)
+            
+            if result:
+                # Update confusion matrices
+                for rater, cm in result['confusion_matrices'].items():
+                    self.confusion_matrices[rater] += cm
+                
+                # Store results
+                self.results.append(result['results'])
+                
+                # Create visualization if requested
+                if show_visualization and result['visualization']:
+                    win = myVtkWin(title=f"Mandible Segmentation - Case {case}")
+                    vis_data = result['visualization']
+                    
+                    # Add surfaces to visualization
+                    for surface_type, (verts, faces) in vis_data['surfaces'].items():
+                        win.addSurf(verts, faces, 
+                                  color=self.colors[surface_type], 
+                                  opacity=0.3)
+                    
+                    win.render()
+                    all_windows.append(win)
         
-        # Create summary dataframe
+        # Create summary dataframe and display statistics
         df = pd.DataFrame(self.results)
         
-        # Calculate and print summary statistics
-        print("\n=== Summary Statistics ===")
-        for metric in ['volume', 'dice', 'hausdorff', 'mean_distance']:
-            for rater in ['rater1', 'rater2', 'rater3', 'majority']:
-                col = f'{rater}_{metric}'
-                if col in df.columns:
-                    mean_val = df[col].mean()
-                    std_val = df[col].std()
-                    print(f"{rater.capitalize()} {metric}: Mean={mean_val:.4f}, StdDev={std_val:.4f}")
-        
-        # Print confusion matrices
-        print("\n=== Confusion Matrices ===")
-        for rater, cm in self.confusion_matrices.items():
-            print(f"\n{rater.capitalize()}:")
-            print(f"[[TN={cm[0,0]}, FP={cm[0,1]}],")
-            print(f" [FN={cm[1,0]}, TP={cm[1,1]}]]")
-            
-            # Calculate and print sensitivity/specificity for the aggregated data
-            sensitivity, specificity = self.compute_sensitivity_specificity(cm)
-            print(f"Sensitivity: {sensitivity:.4f}")
-            print(f"Specificity: {specificity:.4f}")
-
-        # Print tabular results for confusion matrices
+        # Display results
         self.print_confusion_matrices_table()
-        
-        # Perform and display Wilcoxon test results
         self.perform_wilcoxon_tests(df)
-        
-        # Create box plots for the metrics
         self.create_boxplots(df)
-        
-        # Create confusion matrix visualizations
         self.visualize_confusion_matrices()
         
-        # Display the first window interactively if visualization is enabled
+        # Show visualization
         if show_visualization and all_windows:
             all_windows[0].start()
+        
         return df
 
 if __name__ == "__main__":

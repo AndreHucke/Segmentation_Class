@@ -1,3 +1,13 @@
+""""
+# % U-Net 3D implementation
+# % ECE 8396: Medical Image Segmentation
+# % Spring 2024
+# % Author: Prof. Jack Noble; jack.noble@vanderbilt.edu
+# % Modified by: Andre Hucke > Attempt to improve the UNet3D code
+# % Date: 2024-01-09
+# % Parts of this code were created using AI after many attempts to improve it. All code was reviewed and modified by the author.
+"""
+
 import json
 import torch
 import torch.nn as nn
@@ -77,7 +87,7 @@ class DLN_Base(nn.Module):
             plt.legend()
             if plotType is not None:
                 plt.yscale(plotType)
-                plt.pause(.01)  # comment out if live plotting not necessary
+                # plt.pause(.01)  # comment out if live plotting not necessary
 
 
 
@@ -181,7 +191,7 @@ class uNet3D(DLN_Base):
         v1 = 1
         v2 = 0.001
 
-        intersection = torch.sum(ypred * y) 
+        intersection = -torch.sum(ypred * y) 
 
         # Loss components
         f = torch.nn.functional.binary_cross_entropy_with_logits
@@ -219,8 +229,8 @@ class uNet3D(DLN_Base):
             lambda_shape = lambda_shape_final
         
         # Calculate BCE loss with dynamic positive weight
-        weighted_pos_weight = self.weight + pos_weight 
-        bce_loss = v1 * f(ypred, y, pos_weight=weighted_pos_weight) + v2 * intersection
+        weighted_pos_weight = self.weight # * pos_weight 
+        bce_loss = v1 * f(ypred, y, pos_weight=weighted_pos_weight) # + v2 * intersection
         
         # Total loss
         loss = bce_loss + (lambda_dice * dice_loss) + (lambda_shape * loss_shape)
