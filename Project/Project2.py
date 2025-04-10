@@ -20,7 +20,7 @@ class surface():
         self.verts = None
         self.faces = None
         self.img = img
-        self.isolevel = isolevel
+        self.isolevel = None
         self.voxsz = voxsz
     
     def createSurfaceFromVolume(self):

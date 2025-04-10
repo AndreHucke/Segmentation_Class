@@ -3,3 +3,7 @@ EECE_395.zip
 Lectures/
 __pycache__/
 pdfs/
+*pth
+*json
+*png
+*txt
