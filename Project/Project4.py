@@ -159,73 +159,91 @@ class MandibleAnalysis:
 
     def point_to_triangle_distance(self, point, triangle_vertices):
         """
-        Calculate the minimum distance from a point to a triangle.
+        Calculate the minimum distance from a point to a triangle using optimized barycentric coordinates.
         
         Args:
             point: A 3D point [x, y, z]
             triangle_vertices: Array of 3 vertices defining the triangle [v1, v2, v3]
-            
+                
         Returns:
             distance: The minimum distance from point to triangle
             closest_point: The closest point on the triangle
         """
-        q1, q2, q3 = triangle_vertices
-        p = point
+        p = np.array(point)
+        v0, v1, v2 = triangle_vertices
         
-        v1 = q2 - q1
-        v2 = q3 - q1
+        # Compute edges
+        edge0 = v1 - v0  # Edge from v0 to v1
+        edge1 = v2 - v0  # Edge from v0 to v2
         
-        V = np.column_stack((v1, v2))
+        # Vector from v0 to point
+        v0p = p - v0
         
-        try:
-            pinv = np.linalg.pinv(V)
-            ab = pinv @ (p - q1)[:, np.newaxis]
-            a, b = ab.flatten()
+        # Compute dot products for barycentric coordinates
+        a = np.dot(edge0, edge0)
+        b = np.dot(edge0, edge1)
+        c = np.dot(edge1, edge1)
+        d = np.dot(edge0, v0p)
+        e = np.dot(edge1, v0p)
+        
+        # Compute determinant
+        det = a*c - b*b
+        
+        # Handle degenerate triangle
+        if det < 1e-10:
+            return self._point_to_edges_distance(p, [v0, v1, v2])
+        
+        # Calculate barycentric coordinates
+        inv_det = 1.0 / det
+        v = (c*d - b*e) * inv_det
+        w = (a*e - b*d) * inv_det
+        u = 1.0 - v - w
+        
+        if u >= 0.0 and v >= 0.0 and w >= 0.0:
+            # Point projects inside the triangle
+            closest = u*v0 + v*v1 + w*v2
+            return np.linalg.norm(p - closest), closest
+        
+        # Point projects outside the triangle, find closest edge or vertex
+        return self._point_to_edges_distance(p, [v0, v1, v2])
+
+    def _point_to_edges_distance(self, p, vertices):
+        """Find the closest point on any edge of the polygon defined by vertices."""
+        n = len(vertices)
+        min_dist = float('inf')
+        closest = None
+        
+        for i in range(n):
+            v1 = vertices[i]
+            v2 = vertices[(i+1) % n]
             
-            if 0 <= a <= 1 and 0 <= b <= 1 and a + b <= 1:
-                closest = q1 + a * v1 + b * v2
-                return np.linalg.norm(p - closest), closest
-            
-            v3 = q3 - q2
-            
-            c = np.dot(v1, (p - q1)) / np.dot(v1, v1)
-            d = np.dot(v2, (p - q1)) / np.dot(v2, v2)
-            e = np.dot(v3, (p - q2)) / np.dot(v3, v3)
-            
-            c = max(0, min(1, c))
-            d = max(0, min(1, d))
-            e = max(0, min(1, e))
-            
-            dist_edge1 = np.linalg.norm(q1 + c * v1 - p)
-            dist_edge2 = np.linalg.norm(q1 + d * v2 - p)
-            dist_edge3 = np.linalg.norm(q2 + e * v3 - p)
-            
-            min_dist = min(dist_edge1, dist_edge2, dist_edge3)
-            
-            if min_dist == dist_edge1:
-                closest = q1 + c * v1
-            elif min_dist == dist_edge2:
-                closest = q1 + d * v2
-            else:
-                closest = q2 + e * v3
-                
-            return min_dist, closest
-            
-        except np.linalg.LinAlgError:
-            dist_v1 = np.linalg.norm(p - q1)
-            dist_v2 = np.linalg.norm(p - q2)
-            dist_v3 = np.linalg.norm(p - q3)
-            
-            min_dist = min(dist_v1, dist_v2, dist_v3)
-            
-            if min_dist == dist_v1:
-                closest = q1
-            elif min_dist == dist_v2:
-                closest = q2
-            else:
-                closest = q3
-                
-            return min_dist, closest
+            dist, point = self._point_to_segment_distance(p, v1, v2)
+            if dist < min_dist:
+                min_dist = dist
+                closest = point
+        
+        return min_dist, closest
+
+    def _point_to_segment_distance(self, p, a, b):
+        """Calculate minimum distance from point p to line segment ab."""
+        ab = b - a  # Vector from a to b
+        ap = p - a  # Vector from a to p
+        
+        # Length squared of line segment
+        length_sq = np.dot(ab, ab)
+        
+        # Handle degenerate line segment
+        if length_sq < 1e-10:
+            return np.linalg.norm(p - a), a.copy()
+        
+        # Calculate projection parameter
+        t = np.clip(np.dot(ap, ab) / length_sq, 0.0, 1.0)
+        
+        # Compute closest point on the line segment
+        closest = a + t * ab
+        
+        # Return distance and closest point
+        return np.linalg.norm(p - closest), closest
     
     def _process_vertex_batch(self, vertex_batch, faces2, verts2, max_dist):
         """Process a batch of vertices to find minimum distances to triangles."""
@@ -302,7 +320,7 @@ class MandibleAnalysis:
         
         # For larger datasets, use parallel processing
         # Determine number of batches based on CPU count
-        num_workers = min(os.cpu_count(), 8)  # Limit to 8 cores max
+        num_workers = min(os.cpu_count(), 20)  # Limit to 20 cores max
         batch_size = max(1, len(verts1) // (num_workers * 4))  # Create batches for better progress reporting
         vertex_batches = [verts1[i:i+batch_size] for i in range(0, len(verts1), batch_size)]
         
@@ -468,6 +486,24 @@ class MandibleAnalysis:
             'results': case_results,
             'confusion_matrices': local_confusion_matrices
         }
+
+    def print_confusion_matrices_table(self):
+        """Print a formatted table of confusion matrices for each rater."""
+        print("\n=== Confusion Matrices ===")
+        
+        # Print header
+        print(f"{'Rater':<10} {'TN':<8} {'FP':<8} {'FN':<8} {'TP':<8} {'Sensitivity':<12} {'Specificity':<12}")
+        print("-" * 70)
+        
+        # Print data for each rater
+        for rater, cm in self.confusion_matrices.items():
+            sensitivity, specificity = self.compute_sensitivity_specificity(cm)
+            tn, fp = cm[0]
+            fn, tp = cm[1]
+            
+            print(f"{rater.capitalize():<10} {tn:<8} {fp:<8} {fn:<8} {tp:<8} {sensitivity:.4f}{'':>8} {specificity:.4f}{'':>8}")
+        
+        print("-" * 70)
 
     def perform_wilcoxon_tests(self, results_df):
         """Perform Wilcoxon signed-rank tests between raters for each metric."""
@@ -636,6 +672,6 @@ class MandibleAnalysis:
 
 if __name__ == "__main__":
     analysis = MandibleAnalysis()
-    results = analysis.run_analysis(show_visualization=False)
+    results = analysis.run_analysis(show_visualization=True)
     
     input("Press Enter to close all windows and exit...")
