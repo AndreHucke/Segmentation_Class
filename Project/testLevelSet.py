@@ -12,7 +12,7 @@ from Project2 import * # import your previously defined surface class
 from levelSet import * # import your level set class
 
 def testLevelSet():
-    f = open('Project/Project5.json','rt')
+    f = open('EECE_395/Project5.json','rt')
     d = json.load(f)
     f.close()
 
@@ -23,9 +23,10 @@ def testLevelSet():
     fig, ax = plt.subplots(1,2)
     plt.pause(0.1)
     dmapi = np.ones(np.shape(crp))
-    dmapi[2:-3,2:-3,2:-3]=-1
+    # dmapi[2:-3,2:-3,2:-3]=-1
+    dmapi[0:60,0:60,0:-1]=-1 # had to change it from dmapi[2:-3,2:-3,2:-3]=-1 to try to get the whole image in. 
     ls = levelSet()
-    params = levelSetParams(maxiter=50, visrate=1, method='CV', reinitrate=5, mindist=7, convthrsh=1e-2, mu=2, dtt=np.linspace(3,.1,50))
+    params = levelSetParams(maxiter=50, visrate=1, method='CV', reinitrate=5, mindist=7, convthrsh=1e-2, mu=0.5, dtt=np.linspace(3,0.1,50)) # Very tiny stepss to ensure stability. Lots of tunning to get this to work. Maybe next would be to implement a grid search to find the best parameters. Tried messing dtt, but it eventually worked best with the default values. Mostly changed mu.
     dmap = ls.segment(crp, dmapi, params, ax)
 
     win = myVtkWin()
@@ -36,7 +37,7 @@ def testLevelSet():
 
 def testFastMarching():
     # Load data from the JSON file
-    f = open('Project/Project5.json','rt')
+    f = open('EECE_395/Project5.json','rt')
     d = json.load(f)
     f.close()
 
@@ -95,5 +96,5 @@ def testFastMarching():
 
 if __name__ == "__main__":
     # Uncomment one of the lines below to run the desired test
-    # testFastMarching()
+    testFastMarching()
     testLevelSet()

@@ -3,8 +3,6 @@
 # % ECE 8396: Medical Image Segmentation
 # % Spring 2024
 # % Author: Prof. Jack Noble; jack.noble@vanderbilt.edu
-# % Modified by: Andre Hucke > Added upwindEikonal function
-# % Parts of this code were created using AI. All code was reviewed and modified by the author.
 
 
 from heap import *
@@ -130,8 +128,6 @@ class fastMarching:
     def getNB(self):
         return self.nbin, self.nbout
 
-
-
     def insertBorderVoxels(self, dmap_i, fore=True):
         # This function estimates distances for border voxels, pushes those border
         # voxels into the heap, and sets their active status to 2.
@@ -243,90 +239,78 @@ class fastMarching:
 
     def upwindEikonal(self, node):
         """
-        Re-estimate distances for 6-connected neighbors of the given node.
+        Re-estimate distances for 6-connected neighbors of the given node,
+        using all neighbors regardless of active status.
         
         Args:
-            node: An lSNode object with known distance (active status 0)
+            node: An lSNode object with known distance
         """
         # Get coordinates from the lSNode object
         x, y, z = node.x, node.y, node.z
+        r, c, d = self.dmap.shape
         
         # Define the 6-connected neighbors as (dx, dy, dz) offsets
         neighbor_offsets = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
         
         # Process each neighbor
-        for dx, dy, dz in neighbor_offsets:
+        for i, (dx, dy, dz) in enumerate(neighbor_offsets):
             nx, ny, nz = x + dx, y + dy, z + dz
             
             # Check bounds and if neighbor is a trial node
-            if (0 <= nx < self.dmap.shape[0] and 
-                0 <= ny < self.dmap.shape[1] and 
-                0 <= nz < self.dmap.shape[2] and 
-                self.active[nx, ny, nz] == 1):
+            if (0 <= nx < r and 0 <= ny < c and 0 <= nz < d and self.active[nx, ny, nz] == 1):
+                # Collect distance values from all neighbors in each direction
+                a_vals = []
                 
-                # Find minimum distances from known neighbors in each direction
-                min_values = {}
+                # Check x-direction neighbors (removed active status check)
+                if nx > 0:
+                    a_vals.append(self.dmap[nx-1, ny, nz])
+                if nx < r-1:
+                    a_vals.append(self.dmap[nx+1, ny, nz])
                 
-                # Check x-direction
-                if nx > 0 and self.active[nx-1, ny, nz] == 0:
-                    min_values['x'] = self.dmap[nx-1, ny, nz]
-                if nx < self.dmap.shape[0]-1 and self.active[nx+1, ny, nz] == 0:
-                    min_values['x'] = min(min_values.get('x', float('inf')), self.dmap[nx+1, ny, nz])
-                    
-                # Check y-direction
-                if ny > 0 and self.active[nx, ny-1, nz] == 0:
-                    min_values['y'] = self.dmap[nx, ny-1, nz]
-                if ny < self.dmap.shape[1]-1 and self.active[nx, ny+1, nz] == 0:
-                    min_values['y'] = min(min_values.get('y', float('inf')), self.dmap[nx, ny+1, nz])
-                    
-                # Check z-direction
-                if nz > 0 and self.active[nx, ny, nz-1] == 0:
-                    min_values['z'] = self.dmap[nx, ny, nz-1]
-                if nz < self.dmap.shape[2]-1 and self.active[nx, ny, nz+1] == 0:
-                    min_values['z'] = min(min_values.get('z', float('inf')), self.dmap[nx, ny, nz+1])
+                # Check y-direction neighbors
+                if ny > 0:
+                    a_vals.append(self.dmap[nx, ny-1, nz])
+                if ny < c-1:
+                    a_vals.append(self.dmap[nx, ny+1, nz])
                 
-                # Get valid values (finite distances)
-                valid_values = [v for v in min_values.values() if v != float('inf')]
+                # Check z-direction neighbors
+                if nz > 0:
+                    a_vals.append(self.dmap[nx, ny, nz-1])
+                if nz < d-1:
+                    a_vals.append(self.dmap[nx, ny, nz+1])
                 
-                if not valid_values:
+                # Filter out infinity values
+                a_vals = [v for v in a_vals if v != INF]
+                
+                if not a_vals:  # No valid neighbors with known distances
                     continue
-                    
+                
                 # Sort values for easier processing
-                valid_values.sort()
+                a_vals.sort()
+                
+                # Compute new distance using the upwind scheme
                 h = 1.0 / self.speed[nx, ny, nz]
                 new_dist = float('inf')
                 
-                # Compute distance based on number of valid neighbors
-                if len(valid_values) == 1:
-                    # One valid direction - direct solution
-                    new_dist = valid_values[0] + h
+                if len(a_vals) == 1:
+                    # One valid direction - simple addition
+                    new_dist = a_vals[0] + h
+                elif len(a_vals) >= 2:
+                    # Two or more valid directions - use the two smallest values
+                    a, b = a_vals[0], a_vals[1]
                     
-                elif len(valid_values) == 2:
-                    # Two valid directions - quadratic equation
-                    a, b = valid_values
-                    if (a - b)**2 <= 2 * h**2:
-                        new_dist = (a + b + np.sqrt(2 * h**2 - (a - b)**2)) / 2
+                    # Quadratic solution for the Eikonal equation
+                    if (b - a)**2 < h**2:  # The discriminant is positive
+                        new_dist = (a + b + np.sqrt(2 * h**2 - (b - a)**2)) / 2
                     else:
-                        new_dist = min(a, b) + h
-                        
-                else:  # len(valid_values) == 3
-                    # Three valid directions - use the quadratic approximation
-                    a, b, c = valid_values
-                    p = a + b + c
-                    q = a**2 + b**2 + c**2
-                    discriminant = p**2 - 3 * (q - h**2)
-                    
-                    if discriminant >= 0:
-                        new_dist = (p + np.sqrt(discriminant)) / 3
-                    else:
-                        # Fall back to the two smallest values
-                        a, b = valid_values[:2]
-                        if (a - b)**2 <= 2 * h**2:
-                            new_dist = (a + b + np.sqrt(2 * h**2 - (a - b)**2)) / 2
-                        else:
-                            new_dist = min(a, b) + h
+                        # Fall back to the smallest value + h
+                        new_dist = a + h
                 
                 # Update if new distance is smaller
                 if new_dist < self.dmap[nx, ny, nz]:
                     self.dmap[nx, ny, nz] = new_dist
+                    # Add to heap with new priority
                     self.nb.insert(lSNode(nx, ny, nz, new_dist))
+                    # Mark as trial node if not already
+                    if self.active[nx, ny, nz] != 2:
+                        self.active[nx, ny, nz] = 2

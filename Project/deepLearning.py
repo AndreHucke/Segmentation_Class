@@ -1,13 +1,3 @@
-""""
-# % U-Net 3D implementation
-# % ECE 8396: Medical Image Segmentation
-# % Spring 2024
-# % Author: Prof. Jack Noble; jack.noble@vanderbilt.edu
-# % Modified by: Andre Hucke > Attempt to improve the UNet3D code
-# % Date: 2024-01-09
-# % Parts of this code were created using AI after many attempts to improve it. All code was reviewed and modified by the author.
-"""
-
 import json
 import torch
 import torch.nn as nn
@@ -16,49 +6,12 @@ import numpy as np
 import matplotlib
 matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
-import os
 
 # If have NVIDIA GPU, see https://pytorch.org/get-started/locally/ for correct CUDA version
 # After installing the correct version of CUDA, may need to do something like this:
 # >>pip install torch==2.5.0+cu118 torchvision==0.20.0+cu118 torchaudio==2.5.0+cu118 --index-url https://download.pytorch.org/whl/cu118
 #   I am using Cuda 11.8 so in the command I use (cu118) for the packages and the pytorch wheel
 #   If you use 12.1 it would be cu121
-
-# Helper function to convert tensor values to native Python types for JSON serialization
-def tensor_to_python(obj):
-    """
-    Recursively convert tensor values to Python native types for JSON serialization.
-    
-    Parameters:
-    -----------
-    obj : any
-        The object to convert
-        
-    Returns:
-    --------
-    any : Object with tensors converted to Python types
-    """
-    if isinstance(obj, torch.Tensor):
-        # For scalar tensors
-        if obj.numel() == 1:
-            return obj.item()
-        # For non-scalar tensors
-        return obj.detach().cpu().numpy().tolist() 
-    elif isinstance(obj, dict):
-        return {key: tensor_to_python(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [tensor_to_python(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(tensor_to_python(item) for item in obj)
-    elif isinstance(obj, (int, float, str, bool, type(None))):
-        return obj
-    else:
-        try:
-            # Try common numeric types
-            return float(obj)
-        except (TypeError, ValueError):
-            # Return string representation as last resort
-            return str(obj)
 
 # Base class to inherit training/plotting functionality
 class DLN_Base(nn.Module):
@@ -70,21 +23,21 @@ class DLN_Base(nn.Module):
         self.epoch = 0
         self.best_epoch = 0
 
-    def loss_batch(self, loss_func, xb, yb, opt=None):
-        loss = loss_func(self(xb), yb)
+    def loss_batch(self,loss_func,xb,yb,opt=None):
+        # xb will be of shape bs x 60 in our first test dataset
+        # yb will be bs x 1
+        loss = loss_func(self(xb),yb)
         if opt is not None:
-            loss.backward()
-            # Add gradient clipping to prevent explosions
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-            opt.step()
-            opt.zero_grad()
+            loss.backward()  # perform backpropogation
+            opt.step()  # take an optimization step
+            opt.zero_grad()  # reset gradients to none
 
-        return loss.item()
+        return loss.item()  # get loss value from gpu
 
     def Augment(self, xb, yb):
         return xb, yb
 
-    def fit(self, epochs, loss_func, opt, train_D, train_y, valid_D, valid_y, bs, savebest=None, plotType='log'):
+    def fit(self,epochs,loss_func,opt,train_D,train_y,valid_D,valid_y,bs,savebest=None,plotType='log'):
         # train_D and train_y are torch tensors sitting on CPU
         # valid_D and valid_y are torch tensors sitting on GPU
         N = train_y.size()[0]
@@ -92,223 +45,305 @@ class DLN_Base(nn.Module):
         tlosslist = []
         vlosslist = []
         best_val_loss = np.inf
-        
-        # Create figure only once
-        fig = plt.figure(figsize=(10, 6))
-        plt.ion()  # Turn on interactive mode
-        
-        try:
-            for self.epoch in range(epochs):
-                self.train()  # put model in training mode
-                losslist = []
-                for i in range(NB):
-                    start_i = i * bs
-                    end_i = start_i + bs
+        for self.epoch in range(epochs):
+            self.train() # put model in training mode
+            losslist = []
+            for i in range(NB):
+                start_i = i * bs
+                end_i = start_i + bs
 
-                    xb, yb = self.Augment(train_D[start_i:end_i].to(self.dev), train_y[start_i:end_i].to(self.dev))
-                    loss = self.loss_batch(loss_func, xb, yb, opt)  # take gradient descent step
-                    losslist.append(loss)
+                xb, yb = self.Augment(train_D[start_i:end_i].to(self.dev), train_y[start_i:end_i].to(self.dev))
+                loss = self.loss_batch(loss_func,xb,yb,opt) # take gradient descent step
+                losslist.append(loss)
 
-                self.eval()  # put model in validation mode
-                with torch.no_grad():
-                    val_loss = self.loss_batch(loss_func, valid_D, valid_y)
+            self.eval() # put model in validation mode
+            with torch.no_grad():
+                val_loss = self.loss_batch(loss_func,valid_D,valid_y)
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    self.best_epoch = self.epoch
-                    if savebest is not None:
-                        torch.save(self, savebest)
+            if val_loss<best_val_loss:
+                best_val_loss = val_loss
+                self.best_epoch = self.epoch
+                if savebest is not None:
+                    torch.save(self,savebest)
 
-                tlosslist.append(np.mean(losslist))
-                vlosslist.append(val_loss)
-                
-                # Print progress
-                print(f"Epoch {self.epoch+1}/{epochs} - Train loss: {tlosslist[-1]:.4f}, Val loss: {val_loss:.4f}")
-                
-                # Only update plot every 5 epochs or at the end to reduce overhead
-                if (self.epoch + 1) % 5 == 0 or self.epoch == epochs - 1:
-                    # Update plot if window is still open
-                    try:
-                        plt.clf()
-                        plt.plot(np.arange(1, len(tlosslist) + 1), tlosslist, 'r', label='Training')
-                        plt.plot(np.arange(1, len(vlosslist) + 1), vlosslist, 'g', label='Validation')
-                        plt.plot(self.best_epoch + 1, best_val_loss, 'b*', label='Best result')
-                        plt.xlabel('Epoch')
-                        plt.ylabel('Loss')
-                        plt.legend()
-                        if plotType is not None:
-                            plt.yscale(plotType)
-                        plt.draw()
-                        plt.pause(0.001)  # Much shorter pause
-                    except Exception as e:
-                        print(f"Warning: Plot update failed: {e}")
-                        # Continue training even if plotting fails
-        
-        except KeyboardInterrupt:
-            print("\nTraining interrupted by user.")
-        except Exception as e:
-            print(f"Error during training: {e}")
-        finally:
-            # Save final model state if requested
-            if savebest is not None:
-                torch.save(self, f"{os.path.splitext(savebest)[0]}_final.pth")
-            
-            self.tlosslist = tlosslist
-            self.vlosslist = vlosslist
-            
-            print(f"Training completed: {len(tlosslist)}/{epochs} epochs")
-            print(f"Best model saved at epoch {self.best_epoch+1} with validation loss {best_val_loss:.4f}")
-            
-            plt.ioff()  # Turn off interactive mode
-            # Create final plot (non-interactive)
-            plt.figure(figsize=(10, 6))
-            plt.plot(np.arange(1, len(tlosslist) + 1), tlosslist, 'r', label='Training')
-            plt.plot(np.arange(1, len(vlosslist) + 1), vlosslist, 'g', label='Validation')
-            plt.plot(self.best_epoch + 1, best_val_loss, 'b*', label='Best result')
+            tlosslist.append(np.mean(losslist))
+            vlosslist.append(val_loss)
+            plt.cla()
+            plt.plot(np.linspace(1,self.epoch + 1,self.epoch + 1),tlosslist,'r',label='Training')
+            plt.plot(np.linspace(1,self.epoch + 1,self.epoch + 1),vlosslist,'g',label='Validation')
+            plt.plot(self.best_epoch + 1,best_val_loss,'b*',label='Best result')
             plt.xlabel('Epoch')
             plt.ylabel('Loss')
             plt.legend()
             if plotType is not None:
                 plt.yscale(plotType)
-            plt.savefig(f"{os.path.splitext(savebest)[0] if savebest else 'model'}_training_curve.png")
-            
-            return tlosslist, vlosslist
-        
+                plt.pause(.01)  # comment out if live plotting not necessary
+
+
+
+        self.tlosslist = tlosslist
+        self.vlosslist = vlosslist
+
+
+# human activity dataset, samples of 60 inertial unit measurements taken during 5 activities:
+#  (sitting, standing, walking, running, dancing)
+f = open('EECE_395/chiasm.json','rt')
+d = json.load(f)
+
+# Split the json data into training, validation, and test sets using 80/10/10 split
+dev = 'cuda'
+
+D = torch.tensor(np.array(d['D'], dtype=np.float32))
+y = torch.tensor(np.array(d['y'], dtype=np.float32))
+
+testf = 1/10
+validf = 1/10
+trainf = 1 - testf - validf
+lr = 0.1
+
+# Create actual splits based on these fractions
+N = len(y)
+indices = np.random.permutation(N)
+test_size = int(N * testf)
+valid_size = int(N * validf)
+train_size = N - test_size - valid_size
+
+test_indices = indices[:test_size]
+valid_indices = indices[test_size:test_size+valid_size]
+train_indices = indices[test_size+valid_size:]
+
+train_D = D[train_indices].to(dev)
+train_y = y[train_indices].to(dev)
+valid_D = D[valid_indices].to(dev)
+valid_y = y[valid_indices].to(dev)
+test_D = D[test_indices].to(dev)
+test_y = y[test_indices].to(dev)
+
+bs = len(d['y']) # 500
+
+epochs = 300
+dev = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+# dtype = np.float32
+# D = torch.tensor(np.array(dt['D'], dtype=dtype))
+# y = torch.tensor(np.array(dt['y'], dtype=np.longlong) - 1)
+# 
+# D = torch.tensor(np.array(dt['train_D'],dtype=dtype)[0:500])
+# y = torch.tensor(np.array(dt['train_y'],dtype=np.longlong)[0:500] - 1)
+# class labels 0 to 4
+
+# Dv = torch.tensor(np.array(dt['validation_D'], dtype=dtype), device=dev)
+# yv = torch.tensor(np.array(dt['validation_y'], dtype=np.longlong) - 1, device=dev)# class labels 0 to 4
+
+# what we need to do to create a new DLN class:
+class DLN_examp(DLN_Base):
+    def __init__(self,dev):
+        super().__init__(dev)
+        # define layers
+    def forward(self, xb):
+        pass
+        # define how layers are connected and data sent through
+
+# simple fully connected network:
+class DLN(DLN_Base):
+    def __init__(self,dev):
+        super().__init__(dev)
+        feature_channels = 64
+        self.fc1 = nn.Linear(60, feature_channels)
+        self.fc2 = nn.Linear(feature_channels,feature_channels)
+        self.fc3 = nn.Linear(feature_channels,feature_channels)
+        self.fc4 = nn.Linear(feature_channels,feature_channels)
+        self.fc5 = nn.Linear(feature_channels,5)
+
+        self.rm1 = torch.tensor(np.zeros(feature_channels, dtype=np.float32), device=dev)
+        self.rv1 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.w1 = torch.tensor(np.ones(feature_channels,dtype=np.float32),device=dev)
+        self.b1 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+
+        self.rm2 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.rv2 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.w2 = torch.tensor(np.ones(feature_channels,dtype=np.float32),device=dev)
+        self.b2 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+
+        self.rm3 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.rv3 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.w3 = torch.tensor(np.ones(feature_channels,dtype=np.float32),device=dev)
+        self.b3 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+
+        self.rm4 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.rv4 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+        self.w4 = torch.tensor(np.ones(feature_channels,dtype=np.float32),device=dev)
+        self.b4 = torch.tensor(np.zeros(feature_channels,dtype=np.float32),device=dev)
+
+    def forward(self, xb):
+        # FC linear only
+        # xb = self.fc1(xb)
+        # xb = self.fc2(xb)
+        # xb = self.fc3(xb)
+        # xb = self.fc4(xb)
+
+        # FC + ReLU
+        # xb = F.relu(self.fc1(xb))
+        # xb = F.relu(self.fc2(xb))
+        # xb = F.relu(self.fc3(xb))
+        # xb = F.relu(self.fc4(xb))
+
+        # FC + ReLU + BN
+        xb = F.relu(F.batch_norm(self.fc1(xb), running_mean=self.rm1, running_var=self.rv1,
+                    weight=self.w1, bias=self.b1, training=self.training))
+        xb = F.relu(F.batch_norm(self.fc2(xb), running_mean=self.rm2, running_var=self.rv2,
+                    weight=self.w2, bias=self.b2, training=self.training))
+        xb = F.relu(F.batch_norm(self.fc3(xb), running_mean=self.rm3, running_var=self.rv3,
+                    weight=self.w3, bias=self.b3, training=self.training))
+        xb = F.relu(F.batch_norm(self.fc4(xb), running_mean=self.rm4, running_var=self.rv4,
+                    weight=self.w4, bias=self.b4, training=self.training))
+
+        xb = self.fc5(xb)
+        return F.softmax(xb, dim=1)
+
+model = DLN(dev)
+model.to(dev)
+print(model)
+
+opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+model.eval()
+loss_func = torch.nn.functional.cross_entropy
+# print(loss_func(model(valid_y), test_y))
+
+fig, ax = plt.subplots()
+# uncomment to re-run training
+# model.fit(epochs, loss_func, opt, D, y, Dv, yv, bs, 'FCN_HumAct_3.pth')
+
+# model = torch.load('FCN_HumAct_3.pth')
+model.eval()
+
+
+Dt = torch.tensor(np.array(d['test_D'], dtype=np.float32), device=dev)
+yt = torch.tensor(np.array(d['test_y'], dtype=np.longlong) - 1, device=dev)# class labels 0 to 4
+
+y_pred = torch.argmax(model(Dt), axis=1)
+acc = 100 * torch.sum( yt == y_pred).item()/yt.size()[0] # Bug from class: had y as denominator here and y is 2x yt
+print(acc)
+# linear only acc = 82.9%
+# linear + relu acc = 95.9%
+# linear + relu + BN = 97.8%
+
+
+# load existing architecture
+# can do with pre-trained weights if needed
+import torchvision
+model = torchvision.models.resnet18()
+print(model)
+
+# change input to 1 channel grayscale
+model.conv1 = torch.nn.Conv2d(1, 64, kernel_size=(7,7), stride=(1,1), padding=(3,3), bias=False)
+# predict 10 classification labels instead of 1000
+model.fc = torch.nn.Linear(512, 10)
+
+# plt.ioff()
+# plt.show()
+
+
+
+
 # 3D U-Net solution
 class uNet3D(DLN_Base):
-    def __init__(self, dev, inChannels=1, outChannels=1, weight=1., basenumfilt=16, filtsz=(3,3,3),
-                 min_pos_weight=1.0, max_pos_weight=100.0, 
-                 lambda_dice_final=1.0, lambda_shape_final=0.001):
+    def __init__(self,dev,inChannels=1,outChannels=1,weight=1.,basenumfilt=16,filtsz=(3,3,3)):
         super().__init__(dev)
 
-        # Store the class weight factor for loss calculation
-        self.weight = weight.to(dev) if isinstance(weight, torch.Tensor) else torch.tensor(weight, device=dev)
+        self.weight = torch.tensor(weight, device=dev)
 
-        # Store hyperparameters for loss function
-        self.min_pos_weight = min_pos_weight
-        self.max_pos_weight = max_pos_weight
-        self.lambda_dice_final = lambda_dice_final
-        self.lambda_shape_final = lambda_shape_final
-        
-        # Define reusable modules
-        self.activation = nn.LeakyReLU(0.2)
-        self.pool = nn.MaxPool3d(kernel_size=2, stride=2)
-        self.upsample = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        
-        # Encoder path
-        self.enc_conv1 = nn.Sequential(
-            nn.Conv3d(inChannels, basenumfilt, kernel_size=filtsz, padding=1),
-            nn.BatchNorm3d(basenumfilt),
-            self.activation,
-            nn.Conv3d(basenumfilt, basenumfilt, kernel_size=filtsz, padding=1),
-            self.activation
-        )
-        
-        self.enc_conv2 = nn.Sequential(
-            nn.Conv3d(basenumfilt, basenumfilt*2, kernel_size=filtsz, padding=1),
-            nn.BatchNorm3d(basenumfilt*2),
-            self.activation,
-            nn.Conv3d(basenumfilt*2, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation
-        )
-        
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
-            nn.Conv3d(basenumfilt*2, basenumfilt*2, kernel_size=filtsz, padding=1),
-            nn.BatchNorm3d(basenumfilt*2),
-            self.activation,
-            nn.Conv3d(basenumfilt*2, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation
-        )
-        
-        # Decoder path
-        self.dec_conv1 = nn.Sequential(
-            nn.Conv3d(basenumfilt*4, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation,
-            nn.Conv3d(basenumfilt*2, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation
-        )
-        
-        self.dec_conv2 = nn.Sequential(
-            nn.Conv3d(basenumfilt*3, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation,
-            nn.Conv3d(basenumfilt*2, basenumfilt*2, kernel_size=filtsz, padding=1),
-            self.activation
-        )
-        
-        # Final layer
-        self.final = nn.Conv3d(basenumfilt*2, outChannels, kernel_size=filtsz, padding=1)
-        self.sigmoid = nn.Sigmoid()
-        
-        self.apply(self.init_weights)
+        self.cv11 = torch.nn.Conv3d(inChannels,basenumfilt,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv12 = torch.nn.Conv3d(basenumfilt,basenumfilt,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv21 = torch.nn.Conv3d(basenumfilt,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv22 = torch.nn.Conv3d(basenumfilt * 2,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv31 = torch.nn.Conv3d(basenumfilt * 2,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv32 = torch.nn.Conv3d(basenumfilt * 2,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv41 = torch.nn.Conv3d(basenumfilt * 4,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv42 = torch.nn.Conv3d(basenumfilt * 2,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv43 = torch.nn.Conv3d(basenumfilt * 3,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv44 = torch.nn.Conv3d(basenumfilt * 2,basenumfilt * 2,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
+        self.cv45 = torch.nn.Conv3d(basenumfilt * 2,outChannels,kernel_size=filtsz,stride=(1,1,1),padding=(1,1,1))
 
-    def forward(self, x):
-        # Encoder
-        enc1 = self.enc_conv1(x)
-        enc1_pool = self.pool(enc1)
-        
-        enc2 = self.enc_conv2(enc1_pool)
-        enc2_pool = self.pool(enc2)
-        
-        # Bottleneck
-        bottleneck = self.bottleneck(enc2_pool)
-        
-        # Decoder
-        bottleneck_up = self.upsample(bottleneck)
-        skip_connection1 = torch.cat((bottleneck_up, enc2), dim=1)
-        dec1 = self.dec_conv1(skip_connection1)
-        
-        dec1_up = self.upsample(dec1)
-        skip_connection2 = torch.cat((dec1_up, enc1), dim=1)
-        dec2 = self.dec_conv2(skip_connection2)
-        
-        # Final output
-        output = self.final(dec2)
-        return self.sigmoid(output)
+        self.rm1 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.rv1 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.w1 = torch.tensor(np.ones(basenumfilt,dtype=np.float32)).to(dev)
+        self.b1 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.rm2 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.rv2 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.w2 = torch.tensor(np.ones(basenumfilt,dtype=np.float32)).to(dev)
+        self.b2 = torch.tensor(np.zeros(basenumfilt,dtype=np.float32)).to(dev)
+        self.rm3 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.rv3 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.w3 = torch.tensor(np.ones(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.b3 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.rm4 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.rv4 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.w4 = torch.tensor(np.ones(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.b4 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.rm5 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.rv5 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.w5 = torch.tensor(np.ones(basenumfilt * 2,dtype=np.float32)).to(dev)
+        self.b5 = torch.tensor(np.zeros(basenumfilt * 2,dtype=np.float32)).to(dev)
 
-    def init_weights(self, m):
-        if isinstance(m, nn.Conv3d):
+        self.apply(self.init_weights)  ###
+
+    def forward(self,xb):
+        stride = (2,2,2)
+        reluscale = .2
+        m = nn.LeakyReLU(reluscale)
+        mp = nn.MaxPool3d(kernel_size=2,stride=stride)
+        us = nn.Upsample(scale_factor=2,mode='trilinear')  #
+        bn = nn.functional.batch_norm
+
+
+        xb = m(bn(self.cv11(xb),running_mean=self.rm1,running_var=self.rv1,weight=self.w1,bias=self.b1,
+                  training=self.training))
+        xb = m(self.cv12(xb))
+        xb2 = bn(mp(xb),running_mean=self.rm2,running_var=self.rv2,weight=self.w2,bias=self.b2,training=self.training)
+        xb2 = m(bn(self.cv21(xb2),running_mean=self.rm3,running_var=self.rv3,weight=self.w3,bias=self.b3,
+                   training=self.training))
+        xb2 = m(self.cv22(xb2))
+
+        # bottleneck
+        xb3 = bn(mp(xb2),running_mean=self.rm4,running_var=self.rv4,weight=self.w4,bias=self.b4,training=self.training)
+        xb3 = m(bn(self.cv31(xb3),running_mean=self.rm5,running_var=self.rv5,weight=self.w5,bias=self.b5,
+                   training=self.training))
+        xb3 = m(self.cv32(xb3))
+
+        xb3 = us(xb3)
+        xb4 = torch.cat((xb3,xb2),dim=1)  ###
+        xb4 = m(self.cv41(xb4))
+        xb4 = m(self.cv42(xb4))  ###
+        xb4 = us(xb4)
+        xb5 = torch.cat((xb4,xb),dim=1)  ###
+        xb5 = m(self.cv43(xb5))
+        xb6 = m(self.cv44(xb5))  ###
+        xb6 = self.cv45(xb6)
+
+        sm = torch.nn.Sigmoid()
+        return sm(xb6)
+
+
+    def init_weights(self,m):
+        if isinstance(m,nn.Conv3d):
             nn.init.xavier_normal_(m.weight)
 
-    def myLoss(self, ypred, y):
-        """
-        Combined loss function using weighted BCE and Dice loss
-        with lambda parameters to control the balance.
-        """
-        # Add numerical stability to predictions
-        ypred = torch.clamp(ypred, 1e-7, 1.0 - 1e-7)
-        
-        # Binary cross-entropy loss with positive weight
-        pos_weight = torch.clamp(self.weight, min=self.min_pos_weight, max=self.max_pos_weight)
-        pos_weight = pos_weight.expand_as(y)
-        
-        # Use direct BCE loss instead of converting back to logits
-        bce_loss = F.binary_cross_entropy(
-            ypred,
-            y, 
-            weight=pos_weight
-        )
-        
-        # Dice loss with more numerical stability
-        smooth = 1e-5
-        intersection = torch.sum(ypred * y)
-        dice = (2. * intersection + smooth) / (torch.sum(ypred) + torch.sum(y) + smooth)
-        dice_loss = 1 - dice
-        
-        # Combine the losses using lambda parameters
-        alpha = self.lambda_dice_final / (1.0 + self.lambda_dice_final)
-        loss = (1 - alpha) * bce_loss + alpha * dice_loss
-        
-        # Add shape regularization if lambda_shape is non-zero
-        if self.lambda_shape_final > 0:
-            # Simple edge-preserving smoothness constraint
-            dx = torch.abs(ypred[:, :, 1:, :, :] - ypred[:, :, :-1, :, :])
-            dy = torch.abs(ypred[:, :, :, 1:, :] - ypred[:, :, :, :-1, :])
-            dz = torch.abs(ypred[:, :, :, :, 1:] - ypred[:, :, :, :, :-1])
-            
-            shape_loss = torch.mean(dx) + torch.mean(dy) + torch.mean(dz)
-            loss = loss + self.lambda_shape_final * shape_loss
-        
+    def myLoss(self,ypred,y):
+        v1 = 1
+        v2 = 0.001
+        f = torch.nn.functional.binary_cross_entropy_with_logits
+        intersection = -torch.sum(ypred * y)  # autograd compatible
+        # loss = v1 * f(ypred,y,pos_weight=self.weight) #+ v2 * intersection
+        # intersection.backward()
+        vol = torch.mean(torch.sum(ypred, dim=[2,3,4])) # autograd compatible; could do self supervision comparing to target volume
+        # in the project you will implement self supervision comparing the predictions to the mean shape of the chiasm in the training dataset
+        # example of scheduling the BCE positive class weight
+        if self.epoch<80:
+            bcew = torch.tensor([100 - self.epoch], device=self.dev)
+        else:
+            bcew = torch.tensor([20.], device=self.dev)
+        loss = v1 * f(ypred,y,pos_weight=self.weight)  + v2 * intersection
         return loss
 
     #example of basic augmentation
@@ -320,288 +355,11 @@ class uNet3D(DLN_Base):
         yn = torch.cat((yn,torch.flip(torch.swapaxes(y,2,3),[3])),dim=0)
 
         return Dn,yn
-    
-def run_experiments(train_D, train_y, valid_D, valid_y, test_D, test_y, 
-                    weight_f, dev, lr=1e-2, bs=50, max_epochs=500,
-                    save_results=True, results_filename='experiment_results.json'):
-    """
-    A modular experiment framework for testing different hyperparameter configurations.
-    
-    Parameters:
-    -----------
-    train_D, train_y : torch tensors
-        Training data and labels
-    valid_D, valid_y : torch tensors
-        Validation data and labels
-    test_D, test_y : torch tensors
-        Test data and labels
-    weight_f : float
-        Class weight factor
-    dev : str
-        Device to run on ('cuda' or 'cpu')
-    lr : float
-        Learning rate
-    bs : int
-        Batch size
-    max_epochs : int
-        Maximum number of epochs to train
-    save_results : bool
-        Whether to save results to a JSON file
-    results_filename : str
-        Filename to save results to
-        
-    Returns:
-    --------
-    str : Path to the best model
-    """
-    # Parameter values to test
-    experiments = [
-        # Min positive weight experiments
-        {'param_type': 'min_pos_weight', 'values': [1, 5, 10], 
-         'base_config': {'min_pos_weight': 1.0, 'lambda_dice_final': 1.0, 'lambda_shape_final': 0.001}},
-        
-        # Lambda dice experiments  
-        {'param_type': 'lambda_dice_final', 'values': [0.5, 1, 2],
-         'base_config': {'min_pos_weight': 1.0, 'lambda_dice_final': 1.0, 'lambda_shape_final': 0.001}},
-         
-        # Lambda shape experiments
-        {'param_type': 'lambda_shape_final', 'values': [0, 0.001, 0.1],
-         'base_config': {'min_pos_weight': 1.0, 'lambda_dice_final': 1.0, 'lambda_shape_final': 0.001}}
-    ]
-    
-    results = []
-    best_dice = 0
-    best_model_path = None
-    
-    for experiment in experiments:
-        param_type = experiment['param_type']
-        values = experiment['values']
-        base_config = experiment['base_config']
-        
-        print(f"\n=== Testing different {param_type} values ===")
-        
-        for value in values:
-            config = base_config.copy()
-            config[param_type] = value
-            model_name = f"ChiasmUNet_{param_type[0:2]}{value}.pth"
-            
-            print(f"\nTraining with {param_type}={value}...")
-            
-            # Initialize model with current config
-            model = uNet3D(dev, weight=weight_f, 
-                         min_pos_weight=config['min_pos_weight'],
-                         lambda_dice_final=config['lambda_dice_final'],
-                         lambda_shape_final=config['lambda_shape_final'])
-            model.to(dev)
-            
-            # Train model
-            opt = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=3e-5, momentum=.9, nesterov=True)
-            model.fit(max_epochs, model.myLoss, opt, train_D, train_y, valid_D, valid_y, bs, model_name, plotType='log')
-            
-            # Evaluate model
-            result, dice = evaluate_model(model_name, config, param_type, value, 
-                                         test_D, test_y, dev)
-            results.append(result)
-            
-            # Track best model
-            if dice > best_dice:
-                best_dice = dice
-                best_model_path = model_name
-    
-    # Analyze best model
-    if best_model_path:
-        print(f"\n=== Best model: {best_model_path} with Dice score: {best_dice:.4f} ===")
-        best_model = torch.load(best_model_path, map_location=dev, weights_only=False)
-        
-        # Find corresponding result
-        best_result = next((r for r in results if r['dice'] == best_dice), None)
-        if best_result:
-            print("Best model configuration:")
-            for param, value in best_result['config'].items():
-                print(f"  {param}: {value}")
-            
-            print(f"\nBias analysis: {best_result['bias']}")
-            
-            # Visualize sample results
-            visualize_sample_predictions(best_model, test_D, test_y, num_samples=4, dev=dev)
-    
-    # Save results
-    if save_results:
-        # Convert any tensor values to Python native types before saving to JSON
-        serializable_results = tensor_to_python(results)
-        with open(results_filename, 'w') as f:
-            json.dump(serializable_results, f, indent=2)
-        print(f"Results saved to {results_filename}")
-    
-    return best_model_path
-
-def evaluate_model(model_path, config, param_type, param_value, test_D, test_y, dev):
-    """
-    Evaluate a trained model on test data
-    
-    Parameters:
-    -----------
-    model_path : str
-        Path to the trained model
-    config : dict
-        Model configuration
-    param_type : str
-        Parameter type being varied
-    param_value : float
-        Parameter value
-    test_D, test_y : torch tensors
-        Test data and labels
-    dev : str
-        Device to run on
-        
-    Returns:
-    --------
-    dict : Evaluation results
-    float : Dice coefficient
-    """
-    # Load the trained model
-    model = torch.load(model_path, map_location=dev, weights_only=False)
-    model.eval()
-    
-    # Evaluate on test set
-    with torch.no_grad():
-        test_D_gpu = test_D.to(dev)
-        test_y_gpu = test_y.to(dev)
-        ypred = model(test_D_gpu) >= 0.5
-        
-        # Calculate accuracy
-        acc = 100 * torch.sum(test_y_gpu == ypred).item() / torch.prod(torch.tensor(test_y_gpu.size()))
-        
-        # Calculate Dice coefficient
-        smooth = 1e-5
-        intersection = torch.sum(ypred * test_y_gpu).item()
-        dice = (2 * intersection + smooth) / (torch.sum(ypred).item() + torch.sum(test_y_gpu).item() + smooth)
-        
-        # Calculate confusion matrix metrics
-        true_positive = torch.sum((ypred == 1) & (test_y_gpu == 1)).item()
-        false_positive = torch.sum((ypred == 1) & (test_y_gpu == 0)).item()
-        true_negative = torch.sum((ypred == 0) & (test_y_gpu == 0)).item()
-        false_negative = torch.sum((ypred == 0) & (test_y_gpu == 1)).item()
-        
-        # Calculate additional metrics
-        sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
-        specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
-        precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
-        fp_rate = false_positive / (false_positive + true_negative) if (false_positive + true_negative) > 0 else 0
-        fn_rate = false_negative / (false_negative + true_positive) if (false_negative + true_positive) > 0 else 0
-        
-        # Determine bias
-        bias = "False Positives" if fp_rate > fn_rate else "False Negatives" if fn_rate > fp_rate else "No bias"
-        
-        # Store results
-        result = {
-            'param_type': param_type,
-            'param_value': param_value,
-            'config': config.copy(),
-            'accuracy': acc,
-            'dice': dice,
-            'sensitivity': sensitivity,
-            'specificity': specificity,
-            'precision': precision,
-            'fp_rate': fp_rate,
-            'fn_rate': fn_rate,
-            'bias': bias,
-            'confusion_matrix': {
-                'TP': true_positive,
-                'FP': false_positive,
-                'TN': true_negative,
-                'FN': false_negative
-            },
-            'validation_loss': model.vlosslist[-1] if model.vlosslist else None,
-            'best_epoch': model.best_epoch
-        }
-        
-        print(f"\nResults for {param_type}={param_value}:")
-        print(f"  Accuracy: {acc:.2f}%")
-        print(f"  Dice coefficient: {dice:.4f}")
-        print(f"  Sensitivity: {sensitivity:.4f}")
-        print(f"  Specificity: {specificity:.4f}")
-        print(f"  Precision: {precision:.4f}")
-        print(f"  FP rate: {fp_rate:.4f}, FN rate: {fn_rate:.4f}")
-        print(f"  Bias towards: {bias}")
-        print(f"  Best epoch: {model.best_epoch}")
-        
-        return result, dice
-
-def visualize_sample_predictions(model, test_D, test_y, num_samples=4, dev='cuda', save_dir='.'):
-    """
-    Visualize sample predictions from the model compared to ground truth
-    
-    Parameters:
-    -----------
-    model : uNet3D
-        Trained model
-    test_D, test_y : torch tensors
-        Test data and labels
-    num_samples : int
-        Number of samples to visualize
-    dev : str
-        Device to run on
-    save_dir : str
-        Directory to save visualizations
-    """
-    # Select random samples
-    indices = np.random.choice(len(test_D), min(num_samples, len(test_D)), replace=False)
-    
-    model.eval()
-    with torch.no_grad():
-        for i, idx in enumerate(indices):
-            # Get prediction
-            input_sample = test_D[idx:idx+1].to(dev)
-            true_sample = test_y[idx:idx+1]
-            pred_sample = model(input_sample) >= 0.5
-            pred_prob = model(input_sample).cpu()  # Raw probability predictions
-            
-            # Move to CPU for visualization
-            pred_sample = pred_sample.cpu()
-            
-            # Select slices for visualization (middle slice)
-            depth = input_sample.shape[-1]
-            slice_idx = depth // 2
-            
-            fig, ax = plt.subplots(2, 2, figsize=(10, 10))
-            
-            # Input image
-            ax[0, 0].imshow(np.squeeze(test_D[idx, 0, :, :, slice_idx]).T, 'gray', vmin=0, vmax=100)
-            ax[0, 0].set_title('Input Image')
-            ax[0, 0].axis('off')
-            
-            # Ground truth
-            ax[0, 1].imshow(np.squeeze(true_sample[0, 0, :, :, slice_idx]).T, 'gray')
-            ax[0, 1].set_title('Ground Truth')
-            ax[0, 1].axis('off')
-            
-            # Prediction (binary)
-            ax[1, 0].imshow(np.squeeze(pred_sample[0, 0, :, :, slice_idx]).T, 'gray')
-            ax[1, 0].set_title('Prediction (Binary)')
-            ax[1, 0].axis('off')
-            
-            # Prediction (probability)
-            prob_img = ax[1, 1].imshow(np.squeeze(pred_prob[0, 0, :, :, slice_idx]).T, 'viridis')
-            ax[1, 1].set_title('Prediction (Probability)')
-            ax[1, 1].axis('off')
-            
-            # Add colorbar
-            cbar = fig.colorbar(prob_img, ax=ax[1, 1], fraction=0.046, pad=0.04)
-            cbar.set_label('Probability')
-            
-            plt.tight_layout()
-            plt.savefig(f'{save_dir}/sample_prediction_{i}.png')
-            plt.close()
-            
-            print(f"Sample visualization saved as sample_prediction_{i}.png")
 
 # try the UNet on a small Chiasm dataset
-f = open('EECE_395/chiasm.json')
+f = open('..\\Chiasm.json')
 d = json.load(f)
 f.close()
-
-dev = 'cuda'
 
 D = np.array(d['D'], dtype=np.float32)
 y = np.array(d['y'], dtype=np.float32)
@@ -628,47 +386,100 @@ valid_y = torch.tensor(y[valid_indx, np.newaxis, :, :, :], device=dev)
 test_D = torch.tensor(D[test_indx])
 test_y = torch.tensor(y[test_indx, np.newaxis, :, :, :])
 
-# Calculate class imbalance weight to handle the foreground/background imbalance
+# check for class imbalance
 weight_f = torch.sum(train_y==False)/torch.sum(train_y)
-print(f'Class imbalance - background/foreground ratio: {weight_f}')
+print(f'weight: {weight_f}')
+# many more foreground than background voxels
 
-# Simple training approach using dynamic class weighting
-model = uNet3D(dev, weight=weight_f, min_pos_weight=1.0, max_pos_weight=weight_f.item()*1.2)
-model.to(dev)
-
-# Training parameters
-lr = 1e-2
+m = uNet3D(dev, weight = weight_f)
+m.to(dev)
+lr = 5e-3
 bs = 50
-max_epochs = 300
+opt = torch.optim.SGD(m.parameters(), lr=lr, weight_decay=3e-5, momentum=.9, nesterov=True)
 
-# Train with SGD optimizer
-# opt = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=3e-5, momentum=.9, nesterov=True)
+# loss_func = nn.functional.binary_cross_entropy_with_logits
 
-# Use our custom loss function with proper weighting
-# print("Starting training with positive class weighting...")
-# model_name = "ChiasmUNet_weighted.pth"
-# model.fit(max_epochs, model.myLoss, opt, train_D, train_y, valid_D, valid_y, bs, model_name, plotType='log')
+loss_func = m.myLoss
 
-# Evaluate the model
-with torch.no_grad():
-    model.eval()
-    test_D_gpu = test_D.to(dev)
-    test_y_gpu = test_y.to(dev)
-    ypred = model(test_D_gpu) >= 0.5
-    
-    # Calculate Dice coefficient
-    smooth = 1e-5
-    intersection = torch.sum(ypred * test_y_gpu).item()
-    dice = (2 * intersection + smooth) / (torch.sum(ypred).item() + torch.sum(test_y_gpu).item() + smooth)
-    
-    print(f"Test Dice score: {dice:.4f}")
-    
-    # Visualize some sample predictions
-    visualize_sample_predictions(model, test_D, test_y, num_samples=4, dev=dev)
+fig, ax = plt.subplots()
+plt.ion()
+plt.pause(.03)
 
-# Optionally run the full experiments
-run_experiments(train_D, train_y, valid_D, valid_y, test_D, test_y, weight_f, dev, lr, bs)
+# uncomment to re-run UNet training
+# m.fit(100, loss_func, opt, train_D, train_y, valid_D, valid_y, bs, 'ChiasmUNet_BCEpInt.pth', plotType='log')
+
+model = torch.load('ChiasmUNet_BCEpInt.pth')
+model.eval()
+Dt = test_D.to(dev)
+yt = test_y.to(dev)
+ypred = model(Dt) >= 0.5
+acc = 100*torch.sum(yt==ypred).item()/ torch.prod(torch.tensor(yt.size()))
+print(acc)
+
+dice = 2 * torch.sum(ypred * yt )/(torch.sum(ypred) + torch.sum(yt))
+print(dice)
+print(torch.sum(ypred))
+
+fig, ax = plt.subplots(1,2)
+ax[0].imshow(np.squeeze(test_D[0,0,:,:,3]).T, 'gray', vmin=0, vmax=100)
+X, Y = np.meshgrid(range(32), range(32))
+plt.axes(ax[0])
+plt.contour(X,Y, test_y[0,0,:,:,3].numpy().T, levels=[0.5], colors='red' )
+ax[1].imshow(np.squeeze(ypred[0,0,:,:,3].detach().cpu().numpy()).T, 'gray')
+plt.axes(ax[1])
+plt.contour(X,Y, test_y[0,0,:,:,3].numpy().T, levels=[0.5], colors='red' )
+plt.ioff()
+plt.show()
+# exit(0)
 
 
+# using nnUNet:
+# pip install nnunetv2
 
+# define needed environment variables
+import os
+os.environ['nnUNet_raw'] = 'nnUNet_raw'
+os.environ['nnUNet_preprocessed'] = 'nnUNet_preprocessed'
+os.environ['nnUNet_results'] = 'nnUNet_results'
+
+# creating the raw dataset:
+dr = 'nnUNet_raw\\Dataset001_Chiasm\\'
+
+dict = {
+    'channel_names': {"0": "CT"},
+    'labels': {
+        'background': 0,
+        'Chiasm': 1
+    },
+    'numTraining': 48,
+    'file_ending': '.nrrd'
+}
+
+f = open(f'{dr}dataset.json','wt')
+json.dump(dict, f)
+f.close()
+
+import nrrd
+for i in range(len(D)):
+    header = {'kinds': ['domain', 'domain', 'domain'], 'space': 'left-posterior-superior',
+              'space directions': np.array([[1,0,0], [0,1,0], [0,0,1]]), 'encoding': 'ASCII'}
+    if i<9:
+        fl = f'{dr}imagesTr\\Chiasm_00{i+1}_0000.nrrd'
+        ll = f'{dr}labelsTr\\Chiasm_00{i + 1}.nrrd'
+    elif i<99:
+        fl = f'{dr}imagesTr\\Chiasm_0{i + 1}_0000.nrrd'
+        ll = f'{dr}labelsTr\\Chiasm_0{i + 1}.nrrd'
+    else:
+        fl = f'{dr}imagesTr\\Chiasm_{i+1}_0000.nrrd'
+        ll = f'{dr}labelsTr\\Chiasm_{i + 1}.nrrd'
+
+    nrrd.write(fl, D[i, 0,:,:,:], header)
+    nrrd.write(ll, y[i,:,:,:],header)
+
+
+# Run dataset fingerprint extraction
+os.system('nnUNetv2_plan_and_preprocess -d 001 --verify_dataset_integrity')
+
+# Train 2d network, fold 0
+os.system('nnUNetv2_train 001 2d 0 --npz')
 

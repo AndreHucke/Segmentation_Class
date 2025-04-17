@@ -66,15 +66,11 @@ class levelSet:
         Returns:
             dudt: Level set update values for narrow band voxels
         """
-        # Chan-Vese energy terms
-        # F1(I) = (I - c1)²
-        # F2(I) = (I - c2)²
-        F1 = (img - c1)**2
-        F2 = (img - c2)**2
+        # Vectorized computation of Chan-Vese energy terms
+        energy_difference = (img - c1)**2 - (img - c2)**2
         
-        # Regularized Chan-Vese update formula
-        # dudt = μ * κ - λ * (F1 - F2)
-        dudt = mu * kappa - lmbda * (F1 - F2)
+        # Regularized Chan-Vese update formula: μ * κ - λ * (F1 - F2)
+        dudt = mu * kappa - lmbda * energy_difference
         
         return dudt
 
@@ -107,7 +103,7 @@ class levelSet:
         """
         # Get the narrow band voxels
         nbin, nbout = self.fm.getNB()
-        nb = nbin + nbout
+        nb = np.concatenate((nbin, nbout), axis=0)
         
         # Get the number of voxels in the narrow band
         N = len(nb)
@@ -143,22 +139,9 @@ class levelSet:
         return G, xyz, xf, xb, yf, yb, zf, zb
 
     def curvatureNB(self, epsilon):
-        """
-        Compute curvature of the level set function for voxels in the narrow band.
-        
-        Args:
-            epsilon: Minimum permissible value for gradient norms to avoid division by zero
-            
-        Returns:
-            kappa: Curvature values (1 x N array)
-            G: Gradient vectors (3 x N array)
-            nG: Gradient norms (1 x N array)
-            xyz: Coordinates of the narrow band voxels (3 x N array)
-        """
-        # Get gradients and coordinates from gradientNB
+        """Compute mean curvature as divergence of normalized gradient."""
         G, xyz, xf, xb, yf, yb, zf, zb = self.gradientNB()
         
-        # If the narrow band is empty, return empty arrays
         N = G.shape[1]
         if N == 0:
             return np.array([]), G, np.array([]), xyz
@@ -166,110 +149,40 @@ class levelSet:
         # Compute norm of gradients
         nG = np.sqrt(np.sum(G * G, axis=0))
         
-        # Normalize gradients, handling small gradient norms
+        # Normalize gradients, handling small values with epsilon
         nG_safe = np.maximum(nG, epsilon)
-        N_grad = G / nG_safe  # Normalized gradient field N = ∇u/|∇u|
+        Gnorm = G / nG_safe
         
-        # Extract coordinates for readability
+        # Create 3D arrays for the normalized gradients for spatial indexing
+        normG_x = np.zeros((self.r, self.c, self.d))
+        normG_y = np.zeros((self.r, self.c, self.d))
+        normG_z = np.zeros((self.r, self.c, self.d))
+        
+        # Fill in the normalized gradients for the narrow band voxels
         x, y, z = xyz[0, :], xyz[1, :], xyz[2, :]
+        normG_x[x, y, z] = Gnorm[0, :]
+        normG_y[x, y, z] = Gnorm[1, :]
+        normG_z[x, y, z] = Gnorm[2, :]
         
-        # Initialize curvature array
+        # Compute divergence of normalized gradient field for each point
         kappa = np.zeros(N)
         
-        # Compute divergence of normalized gradient field (mean curvature)
         for i in range(N):
-            # Compute partial derivatives of each component of the normalized gradient
-            # div(N) = ∂Nx/∂x + ∂Ny/∂y + ∂Nz/∂z
+            # Get normalized gradients at neighbors using spatial indexing
+            nx_f = normG_x[xf[i], y[i], z[i]]
+            nx_b = normG_x[xb[i], y[i], z[i]]
+            ny_f = normG_y[x[i], yf[i], z[i]]
+            ny_b = normG_y[x[i], yb[i], z[i]]
+            nz_f = normG_z[x[i], y[i], zf[i]]
+            nz_b = normG_z[x[i], y[i], zb[i]]
             
-            # Calculate each partial derivative using central differences where possible
-            # For ∂Nx/∂x
-            if xf[i] != xb[i]:  # Not at boundary
-                dx = xf[i] - xb[i]
-                # Forward difference for Nx at (x+1,y,z)
-                g_xf = np.zeros(3)
-                g_xf[0] = self.fm.dmap[xf[i], y[i], z[i]] - self.fm.dmap[x[i], y[i], z[i]]
-                g_xf[1] = (self.fm.dmap[xf[i], min(y[i]+1, self.c-1), z[i]] - 
-                           self.fm.dmap[xf[i], max(y[i]-1, 0), z[i]]) / 2
-                g_xf[2] = (self.fm.dmap[xf[i], y[i], min(z[i]+1, self.d-1)] - 
-                           self.fm.dmap[xf[i], y[i], max(z[i]-1, 0)]) / 2
-                
-                # Backward difference for Nx at (x-1,y,z)
-                g_xb = np.zeros(3)
-                g_xb[0] = self.fm.dmap[x[i], y[i], z[i]] - self.fm.dmap[xb[i], y[i], z[i]]
-                g_xb[1] = (self.fm.dmap[xb[i], min(y[i]+1, self.c-1), z[i]] - 
-                           self.fm.dmap[xb[i], max(y[i]-1, 0), z[i]]) / 2
-                g_xb[2] = (self.fm.dmap[xb[i], y[i], min(z[i]+1, self.d-1)] - 
-                           self.fm.dmap[xb[i], y[i], max(z[i]-1, 0)]) / 2
-                
-                # Normalize the gradients
-                g_norm_xf = max(np.sqrt(np.sum(g_xf * g_xf)), epsilon)
-                g_norm_xb = max(np.sqrt(np.sum(g_xb * g_xb)), epsilon)
-                
-                nx_xf = g_xf[0] / g_norm_xf
-                nx_xb = g_xb[0] / g_norm_xb
-                
-                dNx_dx = (nx_xf - nx_xb) / dx
-            else:
-                dNx_dx = 0
-                
-            # Similar calculations for ∂Ny/∂y
-            if yf[i] != yb[i]:
-                dy = yf[i] - yb[i]
-                # Forward and backward differences for y component
-                g_yf = np.zeros(3)
-                g_yf[0] = (self.fm.dmap[min(x[i]+1, self.r-1), yf[i], z[i]] - 
-                           self.fm.dmap[max(x[i]-1, 0), yf[i], z[i]]) / 2
-                g_yf[1] = self.fm.dmap[x[i], yf[i], z[i]] - self.fm.dmap[x[i], y[i], z[i]]
-                g_yf[2] = (self.fm.dmap[x[i], yf[i], min(z[i]+1, self.d-1)] - 
-                           self.fm.dmap[x[i], yf[i], max(z[i]-1, 0)]) / 2
-                
-                g_yb = np.zeros(3)
-                g_yb[0] = (self.fm.dmap[min(x[i]+1, self.r-1), yb[i], z[i]] - 
-                           self.fm.dmap[max(x[i]-1, 0), yb[i], z[i]]) / 2
-                g_yb[1] = self.fm.dmap[x[i], y[i], z[i]] - self.fm.dmap[x[i], yb[i], z[i]]
-                g_yb[2] = (self.fm.dmap[x[i], yb[i], min(z[i]+1, self.d-1)] - 
-                           self.fm.dmap[x[i], yb[i], max(z[i]-1, 0)]) / 2
-                
-                g_norm_yf = max(np.sqrt(np.sum(g_yf * g_yf)), epsilon)
-                g_norm_yb = max(np.sqrt(np.sum(g_yb * g_yb)), epsilon)
-                
-                ny_yf = g_yf[1] / g_norm_yf
-                ny_yb = g_yb[1] / g_norm_yb
-                
-                dNy_dy = (ny_yf - ny_yb) / dy
-            else:
-                dNy_dy = 0
-                
-            # Similar calculations for ∂Nz/∂z
-            if self.d > 1 and zf[i] != zb[i]:
-                dz = zf[i] - zb[i]
-                # Forward and backward differences for z component
-                g_zf = np.zeros(3)
-                g_zf[0] = (self.fm.dmap[min(x[i]+1, self.r-1), y[i], zf[i]] - 
-                           self.fm.dmap[max(x[i]-1, 0), y[i], zf[i]]) / 2
-                g_zf[1] = (self.fm.dmap[x[i], min(y[i]+1, self.c-1), zf[i]] - 
-                           self.fm.dmap[x[i], max(y[i]-1, 0), zf[i]]) / 2
-                g_zf[2] = self.fm.dmap[x[i], y[i], zf[i]] - self.fm.dmap[x[i], y[i], z[i]]
-                
-                g_zb = np.zeros(3)
-                g_zb[0] = (self.fm.dmap[min(x[i]+1, self.r-1), y[i], zb[i]] - 
-                           self.fm.dmap[max(x[i]-1, 0), y[i], zb[i]]) / 2
-                g_zb[1] = (self.fm.dmap[x[i], min(y[i]+1, self.c-1), zb[i]] - 
-                           self.fm.dmap[x[i], max(y[i]-1, 0), zb[i]]) / 2
-                g_zb[2] = self.fm.dmap[x[i], y[i], z[i]] - self.fm.dmap[x[i], y[i], zb[i]]
-                
-                g_norm_zf = max(np.sqrt(np.sum(g_zf * g_zf)), epsilon)
-                g_norm_zb = max(np.sqrt(np.sum(g_zb * g_zb)), epsilon)
-                
-                nz_zf = g_zf[2] / g_norm_zf
-                nz_zb = g_zb[2] / g_norm_zb
-                
-                dNz_dz = (nz_zf - nz_zb) / dz
-            else:
-                dNz_dz = 0
-                
-            # Mean curvature is the divergence of the normalized gradient field
-            kappa[i] = dNx_dx + dNy_dy + dNz_dz
+            # Compute partial derivatives of normalized gradient components
+            dx_nx = (nx_f - nx_b) / (xf[i] - xb[i] if xf[i] != xb[i] else 1.0)
+            dy_ny = (ny_f - ny_b) / (yf[i] - yb[i] if yf[i] != yb[i] else 1.0)
+            dz_nz = (nz_f - nz_b) / (zf[i] - zb[i] if zf[i] != zb[i] else 1.0)
+            
+            # Divergence is sum of partial derivatives
+            kappa[i] = dx_nx + dy_ny + dz_nz
         
         return kappa, G, nG, xyz
 
@@ -404,6 +317,3 @@ class levelSet:
 
         self.fm.update(nbdist=params.mindist)
         return self.fm.dmap
-
-
-
