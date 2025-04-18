@@ -182,36 +182,63 @@ class uNet3D(DLN_Base):
         return sm(xb6)
 
 
-    def init_weights(self,m):
-        if isinstance(m,nn.Conv3d):
-            nn.init.xavier_normal_(m.weight)
+    # Add to UNet3D class
+    def init_weights(self, m):
+        if isinstance(m, nn.Conv3d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+        elif isinstance(m, nn.BatchNorm3d):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
 
-    def myLoss(self,ypred,y):
-        v1 = 1
-        v2 = 0.001
-        f = torch.nn.functional.binary_cross_entropy_with_logits
-        intersection = -torch.sum(ypred * y)  # autograd compatible
-        # loss = v1 * f(ypred,y,pos_weight=self.weight) #+ v2 * intersection
-        # intersection.backward()
-        vol = torch.mean(torch.sum(ypred, dim=[2,3,4])) # autograd compatible; could do self supervision comparing to target volume
-        # in the project you will implement self supervision comparing the predictions to the mean shape of the chiasm in the training dataset
-        # example of scheduling the BCE positive class weight
-        if self.epoch<80:
-            bcew = torch.tensor([100 - self.epoch], device=self.dev)
+    def myLoss(self, ypred, y):
+        """
+        Modified to match the loss function used in cGAN.py
+        Combines binary cross entropy and Dice loss
+        """
+        # Positive class weight scheduling
+        if self.epoch < 100:  # Linear decrease over first 100 epochs
+            pos_weight = self.weight - (self.weight - torch.tensor(5.0, device=self.dev)) * (self.epoch / 100)
         else:
-            bcew = torch.tensor([20.], device=self.dev)
-        loss = v1 * f(ypred,y,pos_weight=self.weight)  + v2 * intersection
-        return loss
+            pos_weight = torch.tensor(5.0, device=self.dev)
+            
+        # BCE loss with positive class weighting
+        loss_BCE = F.binary_cross_entropy(ypred, y, weight=pos_weight)
+        
+        # Dice loss component
+        smooth = 1e-5
+        intersection = torch.sum(ypred * y)
+        dice_term = (2.0 * intersection + smooth) / (torch.sum(ypred) + torch.sum(y) + smooth)
+        loss_Dice = 1.0 - dice_term
+        
+        # Combined supervised loss (equivalent to loss_G1 in cGAN)
+        return loss_BCE + loss_Dice
 
     #example of basic augmentation
-    def Augment(self,D,y):
-        # rotate +/- 90 degrees about the z axis
-        Dn = torch.cat((D,torch.flip(torch.swapaxes(D,2,3),[2])),dim=0)
-        yn = torch.cat((y,torch.flip(torch.swapaxes(y,2,3),[2])),dim=0)
-        Dn = torch.cat((Dn,torch.flip(torch.swapaxes(D,2,3),[3])),dim=0)
-        yn = torch.cat((yn,torch.flip(torch.swapaxes(y,2,3),[3])),dim=0)
+    # def Augment(self,D,y):
+    #     # rotate +/- 90 degrees about the z axis
+    #     Dn = torch.cat((D,torch.flip(torch.swapaxes(D,2,3),[2])),dim=0)
+    #     yn = torch.cat((y,torch.flip(torch.swapaxes(y,2,3),[2])),dim=0)
+    #     Dn = torch.cat((Dn,torch.flip(torch.swapaxes(D,2,3),[3])),dim=0)
+    #     yn = torch.cat((yn,torch.flip(torch.swapaxes(y,2,3),[3])),dim=0)
 
-        return Dn,yn
+    #     return Dn,yn
+    def Augment(self, D, y):
+        """
+        Implement data augmentation with rotations around the z axis
+        """
+        # First rotation: +90 degrees about z-axis
+        x_rot1 = torch.flip(torch.swapaxes(D, 2, 3), [2])
+        y_rot1 = torch.flip(torch.swapaxes(y, 2, 3), [2])
+        
+        # Second rotation: -90 degrees about z-axis
+        x_rot2 = torch.flip(torch.swapaxes(D, 2, 3), [3])
+        y_rot2 = torch.flip(torch.swapaxes(y, 2, 3), [3])
+        
+        # Concatenate original and rotated data
+        x_aug = torch.cat((D, x_rot1, x_rot2), dim=0)
+        y_aug = torch.cat((y, y_rot1, y_rot2), dim=0)
+        
+        return x_aug, y_aug
     
 def run_experiments(train_D, train_y, valid_D, valid_y, test_D, test_y, 
                     weight_f, dev, lr=1e-2, bs=50, max_epochs=500,
@@ -351,7 +378,7 @@ def evaluate_model(model_path, config, param_type, param_value, test_D, test_y, 
     with torch.no_grad():
         test_D_gpu = test_D.to(dev)
         test_y_gpu = test_y.to(dev)
-        ypred = model(test_D_gpu) >= 0.5
+        ypred = model(test_D_gpu) >= 0
         
         # Calculate accuracy
         acc = 100 * torch.sum(test_y_gpu == ypred).item() / torch.prod(torch.tensor(test_y_gpu.size()))
@@ -438,7 +465,7 @@ def visualize_sample_predictions(model, test_D, test_y, num_samples=4, dev='cuda
             # Get prediction
             input_sample = test_D[idx:idx+1].to(dev)
             true_sample = test_y[idx:idx+1]
-            pred_sample = model(input_sample) >= 0.5
+            pred_sample = model(input_sample) >= 0
             pred_prob = model(input_sample).cpu()  # Raw probability predictions
             
             # Move to CPU for visualization
@@ -539,7 +566,7 @@ if __name__ == "__main__":
         model.eval()
         test_D_gpu = test_D.to(dev)
         test_y_gpu = test_y.to(dev)
-        ypred = model(test_D_gpu) >= 0.5
+        ypred = model(test_D_gpu) >= 0
         
         # Calculate Dice coefficient
         smooth = 1e-5

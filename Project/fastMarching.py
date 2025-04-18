@@ -240,7 +240,10 @@ class fastMarching:
     def upwindEikonal(self, node):
         """
         Re-estimate distances for 6-connected neighbors of the given node,
-        using all neighbors regardless of active status.
+        Always using the highest order approximation available:
+        - 3rd approximation if 3 neighbors available
+        - 2nd approximation if 2 neighbors available
+        - 1st approximation if 1 neighbor available
         
         Args:
             node: An lSNode object with known distance
@@ -261,7 +264,7 @@ class fastMarching:
                 # Collect distance values from all neighbors in each direction
                 a_vals = []
                 
-                # Check x-direction neighbors (removed active status check)
+                # Check x-direction neighbors
                 if nx > 0:
                     a_vals.append(self.dmap[nx-1, ny, nz])
                 if nx < r-1:
@@ -279,32 +282,55 @@ class fastMarching:
                 if nz < d-1:
                     a_vals.append(self.dmap[nx, ny, nz+1])
                 
-                # Filter out infinity values
-                a_vals = [v for v in a_vals if v != INF]
-                
-                if not a_vals:  # No valid neighbors with known distances
+                # Filter out infinity values and sort
+                U_S = [v for v in a_vals if v != INF]
+                if not U_S:  # No valid neighbors with known distances
                     continue
                 
-                # Sort values for easier processing
-                a_vals.sort()
-                
-                # Compute new distance using the upwind scheme
-                h = 1.0 / self.speed[nx, ny, nz]
+                U_S.sort()  # Sort to get smallest distances first
+                h = 1.0 / self.speed[nx, ny, nz]  # Get local speed value
                 new_dist = float('inf')
                 
-                if len(a_vals) == 1:
-                    # One valid direction - simple addition
-                    new_dist = a_vals[0] + h
-                elif len(a_vals) >= 2:
-                    # Two or more valid directions - use the two smallest values
-                    a, b = a_vals[0], a_vals[1]
+                # Always use the highest order approximation available
+                if len(U_S) >= 3:
+                    # 3rd approximation: Use three smallest distances
+                    N = 3
+                    sum_n = sum(U_S[:N])
+                    sum_p_squared = sum([u**2 for u in U_S[:N]])
+                    sum_p = sum(U_S[:N])
                     
-                    # Quadratic solution for the Eikonal equation
-                    if (b - a)**2 < h**2:  # The discriminant is positive
-                        new_dist = (a + b + np.sqrt(2 * h**2 - (b - a)**2)) / 2
+                    # Calculate discriminant and check if it's valid (non-negative)
+                    discriminant = N + sum_p**2 - N*sum_p_squared
+                    
+                    if discriminant >= 0:
+                        # Formula from slide: dist = 1/N * (sum_n + sqrt(N + (sum_p)^2 - N*sum_p^2))
+                        term1 = sum_n
+                        term2 = np.sqrt(discriminant)
+                        new_dist = (term1 + term2) / N
                     else:
-                        # Fall back to the smallest value + h
-                        new_dist = a + h
+                        # Fall back to 2nd approximation if discriminant is negative
+                        if len(U_S) >= 2:
+                            a, b = U_S[0], U_S[1]
+                            discriminant = 2*h**2 - (b - a)**2
+                            
+                            if discriminant >= 0:
+                                new_dist = (a + b + np.sqrt(discriminant)) / 2
+                            else:
+                                # Fall back to 1st approximation
+                                new_dist = U_S[0] + h
+                elif len(U_S) == 2:
+                    # 2nd approximation: Use two smallest distances
+                    a, b = U_S[0], U_S[1]
+                    discriminant = 2*h**2 - (b - a)**2
+                    
+                    if discriminant >= 0:
+                        new_dist = (a + b + np.sqrt(discriminant)) / 2
+                    else:
+                        # Fall back to 1st approximation
+                        new_dist = U_S[0] + h
+                elif len(U_S) == 1:
+                    # 1st approximation: Use smallest distance
+                    new_dist = U_S[0] + h
                 
                 # Update if new distance is smaller
                 if new_dist < self.dmap[nx, ny, nz]:

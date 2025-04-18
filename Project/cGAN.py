@@ -15,15 +15,15 @@ class Discriminator(nn.Module):
         # Discriminator architecture as specified in the project requirements
         self.conv1 = nn.Conv3d(2, 64, kernel_size=(3, 3, 3), padding=(1, 1, 1), stride=(2, 2, 2))
         self.bn1 = nn.BatchNorm3d(64)
-        self.dropout = nn.Dropout(0.2)
+        self.dropout1 = nn.Dropout(0.2)
         
         self.conv2 = nn.Conv3d(64, 128, kernel_size=(3, 3, 3), padding=(1, 1, 1), stride=(2, 2, 2))
         self.bn2 = nn.BatchNorm3d(128)
-        self.dropout = nn.Dropout(0.2)
+        self.dropout2 = nn.Dropout(0.2)
 
         self.conv3 = nn.Conv3d(128, 256, kernel_size=(3, 3, 3), padding=(1, 1, 1), stride=(2, 2, 2))
         self.bn3 = nn.BatchNorm3d(256)
-        self.dropout = nn.Dropout(0.2)
+        self.dropout3 = nn.Dropout(0.2)
 
         self.conv4 = nn.Conv3d(256, 1, kernel_size=(3, 3, 3), padding=(1, 1, 1), stride=(4, 4, 1))
         
@@ -42,13 +42,13 @@ class Discriminator(nn.Module):
         
         # Apply convolutional layers with LeakyReLU (negative slope 0.2)
         x = F.leaky_relu(self.bn1(self.conv1(x)), negative_slope=0.2)
-        x = self.dropout(x)
+        x = self.dropout1(x)
         
         x = F.leaky_relu(self.bn2(self.conv2(x)), negative_slope=0.2)
-        x = self.dropout(x)
+        x = self.dropout2(x)
         
         x = F.leaky_relu(self.bn3(self.conv3(x)), negative_slope=0.2)
-        x = self.dropout(x)
+        x = self.dropout3(x)
         
         # Final convolution and sigmoid activation
         x = self.conv4(x)
@@ -78,47 +78,21 @@ class cGAN(nn.Module):
     
     def Augment(self, x_batch, y_batch):
         """
-        Implement data augmentation with reflection and rotations as required in the project
-        - Reflection of the data about each axis (x,y,z)
-        - 90 degree rotations around the z axis (+90, -90)
+        Implement data augmentation with rotations around the z axis
         """
-        batch_size = x_batch.size(0)
-        augmented_x = []
-        augmented_y = []
+        # First rotation: +90 degrees about z-axis
+        x_rot1 = torch.flip(torch.swapaxes(x_batch, 2, 3), [2])
+        y_rot1 = torch.flip(torch.swapaxes(y_batch, 2, 3), [2])
         
-        for i in range(batch_size):
-            x = x_batch[i:i+1]
-            y = y_batch[i:i+1]
-            
-            # Original
-            augmented_x.append(x)
-            augmented_y.append(y)
-            
-            # Reflection about x axis
-            augmented_x.append(torch.flip(x, dims=[2]))
-            augmented_y.append(torch.flip(y, dims=[2]))
-            
-            # Reflection about y axis
-            augmented_x.append(torch.flip(x, dims=[3]))
-            augmented_y.append(torch.flip(y, dims=[3]))
-            
-            # Reflection about z axis
-            augmented_x.append(torch.flip(x, dims=[4]))
-            augmented_y.append(torch.flip(y, dims=[4]))
-            
-            # 90 degree rotation around z-axis (+90)
-            x_rot90 = torch.transpose(x, 2, 3).flip(dims=[3])
-            y_rot90 = torch.transpose(y, 2, 3).flip(dims=[3])
-            augmented_x.append(x_rot90)
-            augmented_y.append(y_rot90)
-            
-            # 90 degree rotation around z-axis (-90)
-            x_rot270 = torch.transpose(x, 2, 3).flip(dims=[2])
-            y_rot270 = torch.transpose(y, 2, 3).flip(dims=[2])
-            augmented_x.append(x_rot270)
-            augmented_y.append(y_rot270)
+        # Second rotation: -90 degrees about z-axis
+        x_rot2 = torch.flip(torch.swapaxes(x_batch, 2, 3), [3])
+        y_rot2 = torch.flip(torch.swapaxes(y_batch, 2, 3), [3])
         
-        return torch.cat(augmented_x, dim=0), torch.cat(augmented_y, dim=0)
+        # Concatenate original and rotated data
+        x_aug = torch.cat((x_batch, x_rot1, x_rot2), dim=0)
+        y_aug = torch.cat((y_batch, y_rot1, y_rot2), dim=0)
+        
+        return x_aug, y_aug
 
     def visualize_sample_predictions(self, test_D, test_y, num_samples=4, save_dir='.'):
         """
@@ -145,7 +119,7 @@ class cGAN(nn.Module):
                 # Get prediction
                 input_sample = test_D[idx:idx+1].to(self.dev)
                 true_sample = test_y[idx:idx+1]
-                pred_sample = self.generator(input_sample) >= 0.5
+                pred_sample = self.generator(input_sample) >= 0
                 pred_prob = self.generator(input_sample).cpu()  # Raw probability predictions
                 
                 # Get discriminator scores
@@ -203,12 +177,9 @@ class cGAN(nn.Module):
         """Calculate Dice loss for evaluation"""
         smooth = 1e-5
         
-        # Apply thresholding for binary prediction
-        pred_binary = (pred > 0.5).float()
-        
         # Calculate intersection and union
-        intersection = torch.sum(pred_binary * target)
-        union = torch.sum(pred_binary) + torch.sum(target)
+        intersection = torch.sum(pred * target)
+        union = torch.sum(pred) + torch.sum(target)
         
         # Calculate Dice coefficient
         dice_coef = (2.0 * intersection + smooth) / (union + smooth)
@@ -219,9 +190,8 @@ class cGAN(nn.Module):
     def calculate_dice_score(self, pred, target):
         """Compute Dice score with predicted and ground truth segmentations"""
         smooth = 1e-5
-        pred_binary = (pred > 0.5).float()
-        intersection = 2 * torch.sum(pred_binary * target) + smooth
-        return intersection / (torch.sum(pred_binary) + torch.sum(target) + smooth)
+        intersection = 2 * torch.sum(pred * target) + smooth
+        return intersection / (torch.sum(pred) + torch.sum(target) + smooth)
     
     def train_model(self, train_D, train_y, valid_D, valid_y, num_epochs=500, bs=10, lr=1e-2, 
                     weight_initial=100.0, weight_final=5.0, savebest=None):
@@ -259,8 +229,8 @@ class cGAN(nn.Module):
         valid_y = valid_y.to(self.dev)
         
         # Setup optimizers for generator and discriminator
-        optimizer_G = torch.optim.SGD(self.generator.parameters(), lr=lr, momentum=0.99)
-        optimizer_D = torch.optim.SGD(self.discriminator.parameters(), lr=lr, momentum=0.99)
+        optimizer_G = torch.optim.SGD(self.generator.parameters(), lr=lr, momentum=0.9)
+        optimizer_D = torch.optim.SGD(self.discriminator.parameters(), lr=lr, momentum=0.9)
         
         # Training records
         train_losses_D = []
@@ -410,7 +380,9 @@ class cGAN(nn.Module):
             epoch_pbar.set_postfix({
                 'G_loss': f'{avg_G_loss:.4f}',
                 'Val_dice': f'{valid_dice:.4f}',
-                'Best': f'{best_val_loss:.4f}'
+                'Best': f'{best_val_loss:.4f}',
+                'D_loss': f'{avg_D_loss:.4f}',
+                'Val_loss': f'{valid_loss:.4f}'
             })
             
             # Save best model and checkpoint current model
@@ -530,6 +502,9 @@ if __name__ == "__main__":
     # Calculate class imbalance 
     weight_f = torch.sum(train_y==0)/torch.sum(train_y==1)
     print(f"Class imbalance ratio: {weight_f.item():.2f}")
+    print(f"Positive pixels: {torch.sum(train_y==1).item()}")
+    print(f"Total pixels: {train_y.numel()}")
+    print(f"Percentage: {100*torch.sum(train_y==1).item()/train_y.numel():.4f}%")
     
     # Create and train model
     model = cGAN(dev)
@@ -545,7 +520,7 @@ if __name__ == "__main__":
         bs=10,
         lr=1e-2,
         weight_initial=100.0,
-        weight_final=5.0, 
+        weight_final=20.0, 
         savebest="cGAN_chiasm.pth"
     )
 
