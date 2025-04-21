@@ -3,8 +3,8 @@
 # % ECE 8396: Medical Image Segmentation
 # % Spring 2024
 # % Author: Prof. Jack Noble; jack.noble@vanderbilt.edu
-# % Modified by: Andre Hucke > Attempt to improve the UNet3D code
-# % Date: 2024-01-09
+# % Modified by: Andre Hucke
+# % Date: 2024-04-21
 # % Parts of this code were created using AI after many attempts to improve it. All code was reviewed and modified by the author.
 """
 

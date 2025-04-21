@@ -15,3 +15,4 @@ pdfs/
 *.mkv
 *.mp3
 checkpoints/
+outputs/

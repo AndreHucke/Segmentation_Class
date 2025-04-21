@@ -1,3 +1,13 @@
+""""
+# % cGAN implementation
+# % ECE 8396: Medical Image Segmentation
+# % Spring 2024
+# % Author: Prof. Jack Noble; jack.noble@vanderbilt.edu
+# % Modified by: Andre Hucke
+# % Date: 2024-04-21
+# % Parts of this code were created using AI after many attempts to improve it. All code was reviewed and modified by the author.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,6 +15,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import json
+from datetime import datetime
 from Project6 import uNet3D
 from tqdm import tqdm, trange
 
@@ -174,11 +185,9 @@ class cGAN(nn.Module):
                 
                 # Move to CPU for visualization
                 pred_sample = pred_sample.cpu()
-                
-                # Select slices for visualization (middle slice)
-                depth = input_sample.shape[-1]
-                # slice_idx = depth // 2  # Use middle slice for consistent visualization
-                slice_idx = 3  # Use first slice for consistent visualization
+
+                # Use the third slice for visualization - best cut to see the ground truth
+                slice_idx = 3 
                 
                 fig, ax = plt.subplots(2, 2, figsize=(12, 10))
                 
@@ -505,8 +514,11 @@ class cGAN(nn.Module):
         self.tlosslist = train_losses_G
         self.vlosslist = val_losses
         
+        # Save the final plot
         plt.ioff()
-        plt.show() # Uncomment to show the final plot
+        plt.savefig('final_plot.png')
+        plt.close()
+        # plt.show() # Uncomment to show the final plot
         
         return self
 
@@ -552,24 +564,143 @@ if __name__ == "__main__":
     test_D = torch.tensor(D[test_indices])
     test_y = torch.tensor(y[test_indices, np.newaxis, :, :, :])
 
-    # Calculate class imbalance to use as weights instead of a fixed 100
+    # Calculate class imbalance to use as weights
     weight_f = torch.sum(train_y==0)/torch.sum(train_y==1)
     print(f"Class imbalance factor: {weight_f:.2f}")
 
-    # Create and train the model
-    model = cGAN(dev)
-    model = model.train_model(train_D, train_y, valid_D, valid_y, 
-                             num_epochs=500, bs=5, lr=1e-2, 
-                             weight_initial=weight_f, weight_final=5.0,
-                             savebest='cGAN_chiasm.pth', g_d_ratio=1)
+    # Define hyperparameter search space
+    param_space = {
+        'bs': [2, 4, 6, 8, 10],
+        'lr': [1e-4, 5e-4, 1e-3, 5e-3, 1e-2],
+        'weight_final': [1.0, 3.0, 5.0, 10.0],
+        'g_d_ratio': [1, 2, 3, 4, 5],
+        'weight_initial': [100.0, float(weight_f)]  # Use either 100.0 or the calculated class imbalance factor
+    }
     
-    # After loading or training your model:
-    model.visualize_sample_predictions(test_D, test_y, num_samples=4, save_dir='sample_predictions')
+    # Number of random trials to perform
+    num_trials = 15
     
-    # Test the model on test set
-    model.eval()
-    with torch.no_grad():
-        test_preds = model(test_D.to(dev)) >= 0.5
-        dice_score = model.calculate_dice_score(test_preds, test_y.to(dev)).item()
+    # Shorter number of epochs for hyperparameter search
+    search_epochs = 50
+    
+    # Storage for results
+    results = []
+    best_dice = 0
+    best_params = {}
+    best_model = None
+    
+    print(f"Starting random hyperparameter search with {num_trials} trials")
+    
+    for trial in range(num_trials):
+        # Sample random hyperparameters
+        bs = np.random.choice(param_space['bs'])
+        lr = np.random.choice(param_space['lr'])
+        weight_final = np.random.choice(param_space['weight_final'])
+        g_d_ratio = np.random.choice(param_space['g_d_ratio'])
+        weight_initial = np.random.choice(param_space['weight_initial'])
         
-    print(f"Final test Dice score: {dice_score:.4f}")
+        # Record the combination
+        params = {
+            'bs': int(bs),
+            'lr': float(lr),
+            'weight_final': float(weight_final),
+            'g_d_ratio': int(g_d_ratio),
+            'weight_initial': float(weight_initial)
+        }
+        
+        print(f"\nTrial {trial+1}/{num_trials} - Parameters: bs={bs}, lr={lr}, weight_final={weight_final}, g_d_ratio={g_d_ratio}, weight_initial={weight_initial}")
+        
+        # Create model with current hyperparameters
+        model = cGAN(dev)
+        checkpoint_path = f'cGAN_trial_{trial+1}.pth'
+        
+        try:
+            # Train with current hyperparameters for a shorter period
+            model = model.train_model(train_D, train_y, valid_D, valid_y, 
+                                    num_epochs=search_epochs, bs=bs, lr=lr, 
+                                    weight_initial=weight_initial, weight_final=weight_final,
+                                    savebest=checkpoint_path, g_d_ratio=g_d_ratio)
+            
+            # Evaluate on validation set
+            model.eval()
+            with torch.no_grad():
+                valid_preds = model(valid_D.to(dev)) >= 0.5
+                valid_dice = model.calculate_dice_score(valid_preds, valid_y.to(dev)).item()
+                
+                # Get loss values
+                best_valid_loss = min(model.vlosslist) if model.vlosslist else float('inf')
+                final_train_loss = model.tlosslist[-1] if model.tlosslist else float('inf')
+            
+            # Record results
+            trial_result = {
+                'params': params,
+                'valid_dice': valid_dice,
+                'best_valid_loss': float(best_valid_loss),
+                'final_train_loss': float(final_train_loss),
+                'best_epoch': model.best_epoch
+            }
+            
+            results.append(trial_result)
+            print(f"Trial {trial+1} completed - Validation Dice: {valid_dice:.4f}")
+            
+            # Update best model if this one is better
+            if valid_dice > best_dice:
+                best_dice = valid_dice
+                best_params = params.copy()
+                best_model = model
+                print(f"New best model found! Dice score: {best_dice:.4f}")
+        
+        except Exception as e:
+            print(f"Error in trial {trial+1}: {e}")
+            # Record failed trial
+            results.append({
+                'params': params,
+                'error': str(e)
+            })
+    
+    # Save all results to JSON for later analysis
+    with open('experiment_results.json', 'w') as f:
+        json.dump({
+            'trials': results,
+            'best_params': best_params,
+            'best_dice': best_dice
+        }, f, indent=2)
+    
+    print("\nHyperparameter search completed!")
+    print(f"Best validation Dice score: {best_dice:.4f}")
+    print(f"Best parameters: {best_params}")
+    
+    if best_model:
+        # Save the best model
+        torch.save(best_model, 'cGAN_best.pth')
+        
+        # Test the best model on test set
+        best_model.eval()
+        with torch.no_grad():
+            test_preds = best_model(test_D.to(dev)) >= 0.5
+            test_dice = best_model.calculate_dice_score(test_preds, test_y.to(dev)).item()
+            
+        print(f"Test Dice score with best parameters: {test_dice:.4f}")
+        
+    # Optional: Train the final model with the best parameters for the full number of epochs
+    print("\nTraining final model with best parameters for full duration...")
+    final_model = cGAN(dev)
+    final_model = final_model.train_model(train_D, train_y, valid_D, valid_y, 
+                                         num_epochs=500, 
+                                         bs=best_params['bs'], 
+                                         lr=best_params['lr'], 
+                                         weight_initial=best_params['weight_initial'], 
+                                         weight_final=best_params['weight_final'],
+                                         savebest='cGAN_chiasm.pth', 
+                                         g_d_ratio=best_params['g_d_ratio'])
+    
+    # Visualize predictions using the best model
+    final_model.visualize_sample_predictions(test_D, test_y, num_samples=4, save_dir='sample_predictions')
+
+    # Final evaluation
+    final_model.eval()
+    with torch.no_grad():
+        test_preds = final_model(test_D.to(dev)) >= 0.5
+        final_dice = final_model.calculate_dice_score(test_preds, test_y.to(dev)).item()
+        
+    print(f"Final model test Dice score: {final_dice:.4f}")
