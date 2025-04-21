@@ -62,6 +62,7 @@ class cGAN(nn.Module):
         
         # Initialize generator using U-Net from Project 6
         self.generator = uNet3D(dev)
+        self.generator.to(dev)  # Explicitly move all parameters of the generator to the device
         
         # Initialize discriminator
         self.discriminator = Discriminator().to(dev)
@@ -75,6 +76,47 @@ class cGAN(nn.Module):
     def forward(self, x):
         # Forward pass just returns generator output
         return self.generator(x)
+    
+    def check_gradients(self, model, name='model'):
+        """
+        Helper function to check if gradients exist and their magnitudes
+        
+        Parameters:
+        -----------
+        model : torch.nn.Module
+            The model to check gradients for
+        name : str
+            Name identifier for the model in print statements
+            
+        Returns:
+        --------
+        dict
+            Dictionary with gradient statistics
+        """
+        total_norm = 0
+        max_norm = 0
+        zero_grad_params = 0
+        total_params = 0
+        
+        for p in model.parameters():
+            if p.grad is not None:
+                total_params += 1
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+                max_norm = max(max_norm, param_norm.item())
+                if param_norm.item() == 0:
+                    zero_grad_params += 1
+            else:
+                zero_grad_params += 1
+        
+        total_norm = total_norm ** 0.5
+        
+        # Return statistics instead of printing them
+        return {
+            'avg': total_norm,
+            'max': max_norm,
+            'zero_percent': 100.0 * zero_grad_params / max(1, total_params)
+        }
     
     def Augment(self, x_batch, y_batch):
         """
@@ -94,7 +136,7 @@ class cGAN(nn.Module):
         
         return x_aug, y_aug
 
-    def visualize_sample_predictions(self, test_D, test_y, num_samples=4, save_dir='.'):
+    def visualize_sample_predictions(self, test_D, test_y, num_samples=4, save_dir='sample_predictions'):
         """
         Visualize sample predictions from the model compared to ground truth
         
@@ -119,7 +161,7 @@ class cGAN(nn.Module):
                 # Get prediction
                 input_sample = test_D[idx:idx+1].to(self.dev)
                 true_sample = test_y[idx:idx+1]
-                pred_sample = self.generator(input_sample) >= 0
+                pred_sample = self.generator(input_sample) >= 0.5
                 pred_prob = self.generator(input_sample).cpu()  # Raw probability predictions
                 
                 # Get discriminator scores
@@ -135,12 +177,13 @@ class cGAN(nn.Module):
                 
                 # Select slices for visualization (middle slice)
                 depth = input_sample.shape[-1]
-                slice_idx = 3 # Best for visualization
+                # slice_idx = depth // 2  # Use middle slice for consistent visualization
+                slice_idx = 3  # Use first slice for consistent visualization
                 
                 fig, ax = plt.subplots(2, 2, figsize=(12, 10))
                 
                 # Input image
-                ax[0, 0].imshow(np.squeeze(test_D[idx, 0, :, :, slice_idx]).T, 'gray')
+                ax[0, 0].imshow(np.squeeze(test_D[idx, 0, :, :, slice_idx]).T, 'gray', vmin=0, vmax=100)
                 ax[0, 0].set_title('Input Image')
                 ax[0, 0].axis('off')
                 
@@ -165,7 +208,10 @@ class cGAN(nn.Module):
                 
                 # Calculate Dice score for this sample
                 dice_score = self.calculate_dice_score(pred_sample, true_sample).item()
-                plt.suptitle(f'Sample {idx} - Dice Score: {dice_score:.4f}', fontsize=16)
+                
+                # Add info about the cGAN's assessment
+                gan_assessment = "Real-looking" if d_score_fake > 0.5 else "Fake-looking"
+                plt.suptitle(f'Sample {idx} - Dice Score: {dice_score:.4f} - GAN assessment: {gan_assessment}', fontsize=16)
                 
                 plt.tight_layout()
                 plt.savefig(f'{save_dir}/cgan_sample_prediction_{i}.png')
@@ -194,9 +240,34 @@ class cGAN(nn.Module):
         return intersection / (torch.sum(pred) + torch.sum(target) + smooth)
     
     def train_model(self, train_D, train_y, valid_D, valid_y, num_epochs=500, bs=10, lr=1e-2, 
-                    weight_initial=100.0, weight_final=5.0, savebest=None):
+                    weight_initial=100.0, weight_final=5.0, savebest=None, g_d_ratio=2):
         """
         Train the cGAN with all components from the project requirements
+        
+        Parameters:
+        -----------
+        train_D : tensor
+            Training data input images
+        train_y : tensor
+            Training data ground truth segmentations
+        valid_D : tensor
+            Validation data input images
+        valid_y : tensor
+            Validation data ground truth segmentations
+        num_epochs : int
+            Number of epochs to train
+        bs : int
+            Batch size
+        lr : float
+            Learning rate
+        weight_initial : float
+            Initial positive class weight for BCE loss
+        weight_final : float
+            Final positive class weight for BCE loss 
+        savebest : str
+            Path to save best model checkpoint
+        g_d_ratio : int
+            Ratio of generator updates to discriminator updates (g_d_ratio:1)
         """
         # Check if a checkpoint exists and load it
         checkpoint_path = savebest if savebest else 'cGAN_chiasm.pth'
@@ -204,7 +275,7 @@ class cGAN(nn.Module):
             checkpoint = torch.load(checkpoint_path, map_location=self.dev, weights_only=False)
             
             # Copy attributes from saved model
-            self.load_state_dict(checkpoint.state_dict(), strict=False)  # Add strict=False here
+            self.load_state_dict(checkpoint.state_dict(), strict=False)
             self.epoch = checkpoint.epoch
             self.best_epoch = checkpoint.best_epoch
             self.tlosslist = checkpoint.tlosslist
@@ -230,7 +301,7 @@ class cGAN(nn.Module):
         
         # Setup optimizers for generator and discriminator
         optimizer_G = torch.optim.SGD(self.generator.parameters(), lr=lr, momentum=0.9)
-        optimizer_D = torch.optim.SGD(self.discriminator.parameters(), lr=lr, momentum=0.9)
+        optimizer_D = torch.optim.SGD(self.discriminator.parameters(), lr=lr*0.5, momentum=0.9)  # Lower LR for discriminator
         
         # Training records
         train_losses_D = []
@@ -272,11 +343,8 @@ class cGAN(nn.Module):
             # Calculate batches
             NB = int(np.ceil(len(labeled_indices) / bs))
             
-            # Create progress bar for batches
-            batch_pbar = tqdm(range(NB), desc=f"Epoch {self.epoch+1}/{num_epochs}", 
-                             leave=False, position=1)
-            
-            for i in batch_pbar:
+            # Process batches without the batch-level progress bar
+            for i in range(NB):
                 # Get batch of labeled data
                 start_i = (i * bs) % len(labeled_indices)
                 end_i = min(start_i + bs, len(labeled_indices))
@@ -288,7 +356,64 @@ class cGAN(nn.Module):
                 # Apply data augmentation
                 x_aug, y_aug = self.Augment(x_batch, y_batch)
                 
-                # Train Discriminator
+                # TRAINING ORDER CHANGE: Train Generator First
+                # This helps prevent the discriminator from becoming too strong too quickly
+                
+                # Train Generator multiple times per discriminator update
+                for _ in range(g_d_ratio):
+                    optimizer_G.zero_grad()
+                    
+                    # Generate segmentation
+                    fake_seg = self.generator(x_aug)
+                    
+                    # Component 1: BCE + Dice loss for labeled data (Loss G1)
+                    # BCE loss with positive class weighting
+                    loss_BCE = F.binary_cross_entropy(fake_seg, y_aug, weight=pos_weight)
+                    
+                    # Dice loss component
+                    smooth = 1e-5
+                    intersection = torch.sum(fake_seg * y_aug)
+                    dice_term = (2.0 * intersection + smooth) / (torch.sum(fake_seg) + torch.sum(y_aug) + smooth)
+                    loss_Dice = 1.0 - dice_term
+                    
+                    # Combined supervised loss
+                    loss_G1 = loss_BCE + loss_Dice
+                    
+                    # Component 2: Adversarial loss - fool the discriminator
+                    # Use adversarial loss directly
+                    fake_output = self.discriminator(x_aug, fake_seg)
+                    
+                    # Component 3: Unlabeled data term (Loss G2)
+                    loss_G2 = 0
+                    if D_unlabeled is not None and len(unlabeled_indices) > 0:
+                        # Get batch of unlabeled data
+                        unl_indices = torch.randperm(len(unlabeled_indices))[:bs]
+                        x_unlabeled = D_unlabeled[unl_indices].to(self.dev)
+                        
+                        # Generate segmentation for unlabeled data
+                        unlabeled_seg = self.generator(x_unlabeled)
+                        
+                        # Get discriminator score for unlabeled data
+                        disc_unlabeled_output = self.discriminator(x_unlabeled, unlabeled_seg)
+                        
+                        # Simple adversarial loss for unlabeled data
+                        loss_G2 = F.binary_cross_entropy(disc_unlabeled_output, torch.ones_like(disc_unlabeled_output).to(self.dev) * 0.9)
+                    
+                    # Total generator loss with adjusted weights
+                    G_loss = loss_G1 + loss_G2 + loss_Dice
+                    G_loss.backward()
+                    
+                    # Check generator gradients
+                    g_grad_stats = self.check_gradients(self.generator, name="Generator")
+                    
+                    # Apply gradient clipping to prevent exploding gradients
+                    torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1.0)
+                    optimizer_G.step()
+                    
+                    # Record loss
+                    epoch_G_losses.append(G_loss.item())
+                
+                # Now train Discriminator (only once per iteration)
                 optimizer_D.zero_grad()
                 
                 # Real samples
@@ -296,71 +421,27 @@ class cGAN(nn.Module):
                 real_labels = torch.ones_like(real_output).to(self.dev) * 0.9  # Label smoothing
                 D_real_loss = F.binary_cross_entropy(real_output, real_labels)
                 
-                # Fake samples
-                fake_seg = self.generator(x_aug).detach()
+                # Fake samples - make sure to get fresh predictions
+                with torch.no_grad():
+                    fake_seg = self.generator(x_aug).detach()
                 fake_output = self.discriminator(x_aug, fake_seg)
                 fake_labels = torch.zeros_like(fake_output).to(self.dev) + 0.1  # Label smoothing
                 D_fake_loss = F.binary_cross_entropy(fake_output, fake_labels)
                 
                 # Total discriminator loss
-                D_loss = D_real_loss + D_fake_loss
+                D_loss = D_fake_loss
                 D_loss.backward()
+                
+                # Get discriminator gradients after backward pass
+                d_grad_stats = self.check_gradients(self.discriminator, name="Discriminator")
+                
+                # Apply gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1.0)
                 optimizer_D.step()
                 
-                # Train Generator
-                optimizer_G.zero_grad()
-                
-                # Generate segmentation
-                fake_seg = self.generator(x_aug)
-                
-                # Component 1: BCE + Dice loss for labeled data (Loss G1)
-                # BCE loss with positive class weighting
-                loss_BCE = F.binary_cross_entropy(fake_seg, y_aug, weight=pos_weight)
-                
-                # Dice loss component
-                smooth = 1e-5
-                intersection = torch.sum(fake_seg * y_aug)
-                dice_term = (2.0 * intersection + smooth) / (torch.sum(fake_seg) + torch.sum(y_aug) + smooth)
-                loss_Dice = 1.0 - dice_term
-                
-                # Combined supervised loss
-                loss_G1 = loss_BCE + loss_Dice
-                
-                # Component 2: Unlabeled data term (Loss G2)
-                loss_G2 = 0
-                if D_unlabeled is not None and len(unlabeled_indices) > 0:
-                    # Get batch of unlabeled data
-                    unl_indices = torch.randperm(len(unlabeled_indices))[:bs]
-                    x_unlabeled = D_unlabeled[unl_indices].to(self.dev)
-                    
-                    # Generate segmentation for unlabeled data
-                    unlabeled_seg = self.generator(x_unlabeled)
-                    
-                    # Get discriminator score
-                    disc_output = self.discriminator(x_unlabeled, unlabeled_seg)
-                    
-                    # Generator should fool discriminator to believe these are real
-                    loss_G2 = F.binary_cross_entropy(disc_output, torch.ones_like(disc_output).to(self.dev) * 0.9)
-                
-                # Component 3: Adversarial loss for labeled data (Loss G3)
-                fake_output = self.discriminator(x_aug, fake_seg)
-                loss_G3 = F.binary_cross_entropy(fake_output, real_labels)
-                
-                # Total generator loss
-                G_loss = loss_G1 + loss_G2 + loss_G3
-                G_loss.backward()
-                optimizer_G.step()
-                
-                # Record losses
-                epoch_G_losses.append(G_loss.item())
+                # Record loss
                 epoch_D_losses.append(D_loss.item())
-                
-                # Update batch progress bar with current losses
-                batch_pbar.set_postfix({
-                    'G_loss': f'{G_loss.item():.4f}',
-                    'D_loss': f'{D_loss.item():.4f}'
-                })
-            
+
             # Validation step
             self.eval()
             with torch.no_grad():
@@ -382,7 +463,9 @@ class cGAN(nn.Module):
                 'Val_dice': f'{valid_dice:.4f}',
                 'Best': f'{best_val_loss:.4f}',
                 'D_loss': f'{avg_D_loss:.4f}',
-                'Val_loss': f'{valid_loss:.4f}'
+                'Val_loss': f'{valid_loss:.4f}',
+                'D_grad': f'{d_grad_stats["avg"]:.2e}',
+                'G_grad': f'{g_grad_stats["avg"]:.2e}'
             })
             
             # Save best model and checkpoint current model
@@ -469,72 +552,24 @@ if __name__ == "__main__":
     test_D = torch.tensor(D[test_indices])
     test_y = torch.tensor(y[test_indices, np.newaxis, :, :, :])
 
-    # Plot all data from the json and their ground truth
-    # num_images = D.shape[0]  # Total number of images (48)
-    # cols = 6  # Number of columns in the grid
-    # rows = (num_images + cols - 1) // cols  # Number of rows needed
-
-    # fig, axes = plt.subplots(rows, cols, figsize=(20, rows * 3.5))
-    # axes = axes.flatten()  # Flatten to make indexing easier
-
-    # print(D.shape)
-    # slc = 3
-
-    # for i in range(num_images):
-    #     # Plot original image
-    #     axes[i].imshow(np.squeeze(D[i, 0, :, :, slc]).T, 'gray')
-        
-    #     # Overlay segmentation mask (uncomment to show masks as overlay)
-    #     axes[i].imshow(np.squeeze(y[i, np.newaxis, :, :, slc]).T, 'jet', alpha=0.5)
-        
-    #     axes[i].set_title(f"Image {i+1}")
-    #     axes[i].axis('off')
-
-    # # Turn off any unused subplots
-    # for i in range(num_images, len(axes)):
-    #     axes[i].axis('off')
-
-    # plt.tight_layout()
-    # plt.savefig('all_dataset_images.png', dpi=150)  # Save the figure as it might be large
-    # plt.show()
-
-
-    # Calculate class imbalance 
+    # Calculate class imbalance to use as weights instead of a fixed 100
     weight_f = torch.sum(train_y==0)/torch.sum(train_y==1)
-    print(f"Class imbalance ratio: {weight_f.item():.2f}")
-    print(f"Positive pixels: {torch.sum(train_y==1).item()}")
-    print(f"Total pixels: {train_y.numel()}")
-    print(f"Percentage: {100*torch.sum(train_y==1).item()/train_y.numel():.4f}%")
-    
-    # Create and train model
-    model = cGAN(dev)
-    model.to(dev)
-    
-    # Train model
-    model.train_model(
-        train_D=train_D,
-        train_y=train_y,
-        valid_D=valid_D,
-        valid_y=valid_y,
-        num_epochs=500,
-        bs=10,
-        lr=1e-2,
-        weight_initial=100.0,
-        weight_final=20.0, 
-        savebest="cGAN_chiasm.pth"
-    )
+    print(f"Class imbalance factor: {weight_f:.2f}")
 
-    model.visualize_sample_predictions(
-        test_D=test_D,
-        test_y=test_y,
-        num_samples=4,
-        save_dir='sample_predictions'
-    )
+    # Create and train the model
+    model = cGAN(dev)
+    model = model.train_model(train_D, train_y, valid_D, valid_y, 
+                             num_epochs=500, bs=5, lr=1e-2, 
+                             weight_initial=weight_f, weight_final=5.0,
+                             savebest='cGAN_chiasm.pth', g_d_ratio=1)
     
-    # Evaluate on test set
+    # After loading or training your model:
+    model.visualize_sample_predictions(test_D, test_y, num_samples=4, save_dir='sample_predictions')
+    
+    # Test the model on test set
     model.eval()
     with torch.no_grad():
-        test_preds = model(test_D.to(dev))
+        test_preds = model(test_D.to(dev)) >= 0.5
         dice_score = model.calculate_dice_score(test_preds, test_y.to(dev)).item()
         
     print(f"Final test Dice score: {dice_score:.4f}")

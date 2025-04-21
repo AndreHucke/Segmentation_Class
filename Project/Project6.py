@@ -190,28 +190,32 @@ class uNet3D(DLN_Base):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
 
-    def myLoss(self, ypred, y):
-        """
-        Modified to match the loss function used in cGAN.py
-        Combines binary cross entropy and Dice loss
-        """
-        # Positive class weight scheduling
-        if self.epoch < 100:  # Linear decrease over first 100 epochs
-            pos_weight = self.weight - (self.weight - torch.tensor(5.0, device=self.dev)) * (self.epoch / 100)
+    def myLoss(self,ypred,y):
+        v1 = 1
+        v2 = 0.001
+        f = torch.nn.functional.binary_cross_entropy_with_logits
+        intersection = -torch.sum(ypred * y)  # autograd compatible
+        # loss = v1 * f(ypred,y,pos_weight=self.weight) #+ v2 * intersection
+        # intersection.backward()
+        vol = torch.mean(torch.sum(ypred, dim=[2,3,4])) # autograd compatible; could do self supervision comparing to target volume
+        # in the project you will implement self supervision comparing the predictions to the mean shape of the chiasm in the training dataset
+        # example of scheduling the BCE positive class weight
+        if self.epoch<80:
+            bcew = torch.tensor([100 - self.epoch], device=self.dev)
         else:
-            pos_weight = torch.tensor(5.0, device=self.dev)
-            
-        # BCE loss with positive class weighting
-        loss_BCE = F.binary_cross_entropy(ypred, y, weight=pos_weight)
-        
-        # Dice loss component
-        smooth = 1e-5
-        intersection = torch.sum(ypred * y)
-        dice_term = (2.0 * intersection + smooth) / (torch.sum(ypred) + torch.sum(y) + smooth)
-        loss_Dice = 1.0 - dice_term
-        
-        # Combined supervised loss (equivalent to loss_G1 in cGAN)
-        return loss_BCE + loss_Dice
+            bcew = torch.tensor([20.], device=self.dev)
+        loss = v1 * f(ypred,y,pos_weight=self.weight)  + v2 * intersection
+        return loss
+
+    #example of basic augmentation
+    def Augment(self,D,y):
+        # rotate +/- 90 degrees about the z axis
+        Dn = torch.cat((D,torch.flip(torch.swapaxes(D,2,3),[2])),dim=0)
+        yn = torch.cat((y,torch.flip(torch.swapaxes(y,2,3),[2])),dim=0)
+        Dn = torch.cat((Dn,torch.flip(torch.swapaxes(D,2,3),[3])),dim=0)
+        yn = torch.cat((yn,torch.flip(torch.swapaxes(y,2,3),[3])),dim=0)
+
+        return Dn,yn
 
     #example of basic augmentation
     # def Augment(self,D,y):
