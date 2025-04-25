@@ -240,10 +240,10 @@ class fastMarching:
     def upwindEikonal(self, node):
         """
         Re-estimate distances for 6-connected neighbors of the given node,
-        Always using the highest order approximation available:
-        - 3rd approximation if 3 neighbors available
-        - 2nd approximation if 2 neighbors available
-        - 1st approximation if 1 neighbor available
+        Starting with the simplest approximation and only moving to higher orders if needed:
+        - 1st approximation if available and good enough
+        - 2nd approximation if 1st isn't good enough and 2 neighbors available
+        - 3rd approximation if 2nd isn't good enough and 3 neighbors available
         
         Args:
             node: An lSNode object with known distance
@@ -291,46 +291,35 @@ class fastMarching:
                 h = 1.0 / self.speed[nx, ny, nz]  # Get local speed value
                 new_dist = float('inf')
                 
-                # Always use the highest order approximation available
-                if len(U_S) >= 3:
-                    # 3rd approximation: Use three smallest distances
-                    N = 3
-                    sum_n = sum(U_S[:N])
-                    sum_p_squared = sum([u**2 for u in U_S[:N]])
-                    sum_p = sum(U_S[:N])
-                    
-                    # Calculate discriminant and check if it's valid (non-negative)
-                    discriminant = N + sum_p**2 - N*sum_p_squared
-                    
-                    if discriminant >= 0:
-                        # Formula from slide: dist = 1/N * (sum_n + sqrt(N + (sum_p)^2 - N*sum_p^2))
-                        term1 = sum_n
-                        term2 = np.sqrt(discriminant)
-                        new_dist = (term1 + term2) / N
-                    else:
-                        # Fall back to 2nd approximation if discriminant is negative
-                        if len(U_S) >= 2:
-                            a, b = U_S[0], U_S[1]
-                            discriminant = 2*h**2 - (b - a)**2
-                            
-                            if discriminant >= 0:
-                                new_dist = (a + b + np.sqrt(discriminant)) / 2
-                            else:
-                                # Fall back to 1st approximation
-                                new_dist = U_S[0] + h
-                elif len(U_S) == 2:
-                    # 2nd approximation: Use two smallest distances
+                # Start with the simplest approximation and only use higher orders if needed
+                
+                # Try 1st order approximation (simplest)
+                if len(U_S) >= 1:
+                    new_dist = U_S[0] + h
+                
+                # Try 2nd order approximation if we have at least 2 neighbors
+                if len(U_S) >= 2:
                     a, b = U_S[0], U_S[1]
                     discriminant = 2*h**2 - (b - a)**2
                     
-                    if discriminant >= 0:
-                        new_dist = (a + b + np.sqrt(discriminant)) / 2
-                    else:
-                        # Fall back to 1st approximation
-                        new_dist = U_S[0] + h
-                elif len(U_S) == 1:
-                    # 1st approximation: Use smallest distance
-                    new_dist = U_S[0] + h
+                    if discriminant >= 0:  # Check if this approximation is valid
+                        new_dist_2nd = (a + b + np.sqrt(discriminant)) / 2
+                        # Use this better approximation
+                        new_dist = new_dist_2nd
+                
+                # Try 3rd order approximation if we have at least 3 neighbors
+                if len(U_S) >= 3:
+                    N = 3
+                    sum_p = sum(U_S[:N])
+                    sum_p_squared = sum([u**2 for u in U_S[:N]])
+                    
+                    # Calculate discriminant and check if it's valid
+                    discriminant = N + sum_p**2 - N*sum_p_squared
+                    
+                    if discriminant >= 0:  # Check if this approximation is valid
+                        new_dist_3rd = (sum_p + np.sqrt(discriminant)) / N
+                        # Use this even better approximation
+                        new_dist = new_dist_3rd
                 
                 # Update if new distance is smaller
                 if new_dist < self.dmap[nx, ny, nz]:
